@@ -56,7 +56,7 @@ var harnessPy string
 // KernelConfig parameterises kernel-session behaviour. Zero values get safe
 // defaults in NewKernelEngine.
 type KernelConfig struct {
-	Slots         int           // max RESIDENT kernels (independent of the exec Sema). Default 3.
+	Slots         int           // max RESIDENT kernels (independent of the exec Sema). Default 6.
 	MemoryBytes   int64         // per-kernel --memory (and --memory-swap). Default 128 MiB.
 	CPUs          float64       // per-kernel --cpus. Default 1.0.
 	Pids          int           // per-kernel --pids-limit. Default 128.
@@ -71,7 +71,7 @@ type KernelConfig struct {
 
 func (c *KernelConfig) applyDefaults() {
 	if c.Slots <= 0 {
-		c.Slots = 3
+		c.Slots = 6
 	}
 	if c.MemoryBytes <= 0 {
 		c.MemoryBytes = 128 << 20

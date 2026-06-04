@@ -339,23 +339,40 @@ async function streamCompletion(bubble){
 }
 
 /* ─────────────────────────────  kernel session  ───────────────────────────── */
+const sleep = ms => new Promise(r=>setTimeout(r, ms));
+
 async function ensureKernel(){
   if(kernel) return kernel;
   setKernel("busy","starting kernel…");
-  const r = await fetch(ISOBOX + "/v1/sessions", {
-    method:"POST",
-    headers:{ "Content-Type":"application/json" },
-    body: JSON.stringify({ runtime:"python", type:"kernel", network:true }),
-  });
-  if(!r.ok){
+  // The server caps resident kernels (slots). If they're all busy it returns 429;
+  // a slot may free up in seconds, so retry a couple times before surfacing a
+  // clear, non-code "pool busy" error (flagged so the loop won't ask the model to
+  // "fix" its code in response).
+  for(let attempt=0; ; attempt++){
+    const r = await fetch(ISOBOX + "/v1/sessions", {
+      method:"POST",
+      headers:{ "Content-Type":"application/json" },
+      body: JSON.stringify({ runtime:"python", type:"kernel", network:true }),
+    });
+    if(r.ok){
+      const j = await r.json();
+      kernel = { id:j.id, token:j.token };
+      setKernel("live","kernel live");
+      return kernel;
+    }
     let j={}; try{ j=await r.json(); }catch(_){}
     if(j.error === "kernel_disabled"){ kernelDisabled = true; setKernel("err","kernel unavailable"); throw new Error("kernel_disabled"); }
+    if(r.status === 429 && attempt < 3){
+      setKernel("busy","waiting for a free kernel slot…");
+      await sleep(1200 * (attempt+1));
+      continue;
+    }
+    if(r.status === 429){
+      setKernel("err","kernel pool busy");
+      const e = new Error("All kernel slots are busy right now. Wait a few seconds and try again."); e.kernelBusy = true; throw e;
+    }
     setKernel("err","kernel error"); throw new Error("kernel start failed ("+r.status+"): "+(j.detail||j.error||r.statusText));
   }
-  const j = await r.json();
-  kernel = { id:j.id, token:j.token };
-  setKernel("live","kernel live");
-  return kernel;
 }
 
 function isDeadKernelResp(status, j){
@@ -494,10 +511,11 @@ async function execCell(h){
   try{
     run = await kernelExec(payload);
   }catch(e){
-    cellError(h.out, e.message); h.errMsg = e.message; h.lastRun = null;
+    cellError(h.out, e.message); h.errMsg = e.message; h.lastRun = null; h.kernelBusy = !!e.kernelBusy;
     h.runBtn.disabled = false; h.sendBtn.disabled = false;
     return null;
   }
+  h.kernelBusy = false;
   renderCellOutput(h.out, run); h.lastRun = run; h.errMsg = null;
   h.runBtn.disabled = false; h.sendBtn.disabled = false;
   return run;
@@ -602,12 +620,17 @@ async function runModelLoop(){
     if(!autoRun) break;   // manual mode: the user runs the cells
 
     // auto-run every cell, collect outputs, feed back, loop
-    let ranAny = false; const outChunks = [];
+    let ranAny = false, kernelBusyHit = false; const outChunks = [];
     for(const c of cells){
       if(stopRequested) break;
       const r = await c.run();
       if(r){ outChunks.push(runToToolText(r)); ranAny = true; }
+      else if(c.kernelBusy){ kernelBusyHit = true; break; }  // infra, not a code error — don't ask the model to "fix" it
       else if(c.errMsg){ outChunks.push("[code interpreter result]\nThe interpreter could not run this block: " + c.errMsg); ranAny = true; }
+    }
+    if(kernelBusyHit){
+      sysNote("All kernel slots are busy right now — wait a few seconds, then click ▶ Run on the cell (or resend your message). Each open tab holds one kernel.", true);
+      break;
     }
     if(!ranAny || stopRequested) break;
     messages.push({ role:"user", content: outChunks.join("\n\n---\n\n") });
@@ -714,6 +737,14 @@ $("#reset").addEventListener("click", reset);
 const autorunEl = $("#autorun");
 autoRun = autorunEl.checked;
 autorunEl.addEventListener("change", ()=>{ autoRun = autorunEl.checked; });
+
+/* Release the kernel when the tab closes so its slot doesn't leak until the idle
+   TTL. keepalive lets the DELETE (with its auth header) outlive the page — which
+   sendBeacon can't do because it can't set X-Session-Token. */
+window.addEventListener("pagehide", ()=>{
+  if(!kernel) return;
+  try{ fetch(ISOBOX + "/v1/sessions/" + kernel.id, { method:"DELETE", headers:{ "X-Session-Token": kernel.token }, keepalive:true }); }catch(_){}
+});
 
 /* starter chips */
 const chips = $("#chips");
