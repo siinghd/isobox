@@ -81,7 +81,7 @@ Values outside a limit's range are clamped to the nearest bound, not rejected.
 Fields:
 
 - `language`, `version`, `backend` (string) — resolved language, resolved version, execution backend (`gvisor`).
-- `run.stdout`, `run.stderr` (string) — captured output (capped at `outputBytes`).
+- `run.stdout`, `run.stderr` (string) — captured output (each stream capped at `outputBytes`).
 - `run.exitCode` (int) — process exit code. A wall-time or memory kill yields `137`.
 - `run.timedOut` (bool) — `true` if killed by the wall-time cap.
 - `run.oomKilled` (bool) — `true` if killed by the memory cap. Disambiguates timeout vs OOM (both surface exitCode 137).

@@ -68,6 +68,8 @@ curl -s localhost:8090/execute -H 'content-type: application/json' -d '{
 
 ## API
 
+📖 Full reference: [`docs/API.md`](docs/API.md) · machine-readable [`/openapi.yaml`](https://isobox.hsingh.app/openapi.yaml) (OpenAPI 3.1) · agent-readable [`/llms.txt`](https://isobox.hsingh.app/llms.txt).
+
 | Method | Path | Purpose |
 |---|---|---|
 | `POST` | `/execute` | Run code, return stdout/stderr/exit. Send `Accept: text/event-stream` for live SSE. |

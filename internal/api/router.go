@@ -62,8 +62,10 @@ func (s *Server) Router(cfg Config) http.Handler {
 	r.Use(requestLogger)
 	r.Use(corsMiddleware)
 
-	// Embedded playground UI.
+	// Embedded playground UI + docs (agent- and machine-readable).
 	r.Get("/", web.Handler())
+	r.Get("/llms.txt", web.LLMs())
+	r.Get("/openapi.yaml", web.OpenAPI())
 
 	// Unauthenticated, cheap endpoints.
 	r.Get("/healthz", s.handleHealthz)
