@@ -168,3 +168,29 @@ curl -s -X POST https://isobox.hsingh.app/v1/sessions/$ID/exec -H "X-Session-Tok
 curl -s -X POST https://isobox.hsingh.app/v1/sessions/$ID/exec -H "X-Session-Token: $TOK" \
   -d '{"code":"print(open(\"/workspace/x\").read())"}'   # -> 42  (state shared across steps)
 ```
+
+## Persistent memory (`/v1/memory`, `/v1/volumes`)
+
+Durable storage an agent recalls across sessions. Open/demo mode = one shared **public** tenant; set `ISOBOX_API_KEYS` for one isolated tenant per key (derived server-side from the key, never from the request).
+
+**Structured KV** — per-tenant, opaque keys, optional TTL, quota 10 MiB / 10k keys:
+
+| Method | Path | Notes |
+|---|---|---|
+| `PUT` | `/v1/memory/{namespace}/{key}` | body = value; `X-TTL-Seconds` optional → `204` |
+| `GET` | `/v1/memory/{namespace}/{key}` | value + `ETag`/`X-Expires-At`, or `404` |
+| `DELETE` | `/v1/memory/{namespace}/{key}` | `204` |
+| `GET` | `/v1/memory/{namespace}?prefix=&limit=&cursor=` | list keys |
+
+**Filesystem volumes** — a named dir that survives sessions and re-attaches at `/memory` (RW, single-writer, quota 512 MiB):
+
+| Method | Path | Notes |
+|---|---|---|
+| `POST` | `/v1/volumes` | `{"name"}` → `{id,...}` |
+| `GET`/`DELETE` | `/v1/volumes`, `/v1/volumes/{id}` | list / get / delete (tenant-scoped) |
+
+Attach via `"volumeId"` at `POST /v1/sessions` → mounted RW at `/memory` for every step. Tenant isolation verified: cross-tenant read/attach all `404`.
+
+## Live-kernel sessions (persistent variables)
+
+`POST /v1/sessions` with `"type":"kernel"` (default `"filesystem"`) keeps a long-lived interpreter so **variables/imports persist across `exec` steps** (Code-Interpreter style), and steps are near-instant. Same hardening, same exec/fs/DELETE endpoints, `/workspace` + attached `/memory` still work. Kernels are pool-capped (`ISOBOX_KERNEL_SLOTS`, default 3) → `429` past the cap; idle-reaped (~30 min). A step that *blocks* past its wall-time ends the kernel (bounded; keep waits short).

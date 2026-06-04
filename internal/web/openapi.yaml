@@ -331,7 +331,9 @@ paths:
               required: [runtime]
               properties:
                 runtime: { type: string, description: language name or alias }
+                type: { type: string, enum: [filesystem, kernel], default: filesystem, description: "kernel = persistent interpreter (variables persist across exec steps)" }
                 ttlSec: { type: integer, description: idle TTL seconds (default 86400) }
+                volumeId: { type: string, description: "optional memory volume to attach RW at /memory" }
       responses:
         '201':
           description: Created
@@ -415,6 +417,59 @@ paths:
       responses:
         '204': { description: Destroyed }
         '401': { description: invalid session token }
+
+  /v1/memory/{namespace}/{key}:
+    parameters:
+      - { name: namespace, in: path, required: true, schema: { type: string } }
+      - { name: key, in: path, required: true, schema: { type: string } }
+    put:
+      summary: Store a KV value (tenant-scoped, optional TTL)
+      parameters:
+        - { name: X-TTL-Seconds, in: header, required: false, schema: { type: integer } }
+      requestBody:
+        required: true
+        content:
+          application/octet-stream: { schema: { type: string, format: binary } }
+      responses:
+        '204': { description: Stored }
+        '413': { description: quota exceeded }
+    get:
+      summary: Read a KV value
+      responses:
+        '200': { description: value (with ETag, X-Expires-At) }
+        '404': { description: absent or expired }
+    delete:
+      summary: Delete a KV value
+      responses: { '204': { description: Deleted } }
+  /v1/memory/{namespace}:
+    get:
+      summary: List keys in a namespace
+      parameters:
+        - { name: namespace, in: path, required: true, schema: { type: string } }
+        - { name: prefix, in: query, required: false, schema: { type: string } }
+        - { name: limit, in: query, required: false, schema: { type: integer } }
+        - { name: cursor, in: query, required: false, schema: { type: string } }
+      responses: { '200': { description: key list } }
+  /v1/volumes:
+    post:
+      summary: Create a named persistent volume (long-term /memory)
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, properties: { name: { type: string } } }
+      responses: { '200': { description: '{ id, name, createdAt }' } }
+    get:
+      summary: List the tenant's volumes
+      responses: { '200': { description: '{ volumes: [...] }' } }
+  /v1/volumes/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    get:
+      summary: Get one volume (tenant-scoped)
+      responses: { '200': { description: volume }, '404': { description: not found } }
+    delete:
+      summary: Delete a volume
+      responses: { '204': { description: Deleted } }
 
 components:
   securitySchemes:

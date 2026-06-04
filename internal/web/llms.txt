@@ -215,3 +215,60 @@ curl -s -X POST https://isobox.hsingh.app/v1/sessions/$ID/exec -H "X-Session-Tok
 curl -s "https://isobox.hsingh.app/v1/sessions/$ID/fs?path=x.txt" -H "X-Session-Token: $TOK"
 curl -s -X DELETE https://isobox.hsingh.app/v1/sessions/$ID -H "X-Session-Token: $TOK"
 ```
+
+## Persistent memory (v1)
+
+Two durable tiers an agent can store and recall across sessions. In open/demo
+mode (no API key) everything is a single shared "public" tenant; configure
+`ISOBOX_API_KEYS` to get one isolated tenant per key (tenant is derived
+server-side from the key, never from the request).
+
+### Structured KV — `/v1/memory`
+- `PUT /v1/memory/{namespace}/{key}` — store the raw request body. Optional
+  `X-TTL-Seconds: <n>` for expiry. `204`. Per-tenant quota 10 MiB / 10k keys.
+- `GET /v1/memory/{namespace}/{key}` — returns the value (with `ETag`,
+  `X-Expires-At`), or `404` if absent/expired.
+- `DELETE /v1/memory/{namespace}/{key}` — `204`.
+- `GET /v1/memory/{namespace}?prefix=&limit=&cursor=` — list keys.
+
+### Filesystem volumes — `/v1/volumes` (long-term `/memory`)
+A named directory that survives sessions and re-attaches to new ones.
+- `POST /v1/volumes` — body `{"name":"..."}` → `{"id","name","createdAt",...}`.
+- `GET /v1/volumes` (list, tenant-scoped) · `GET /v1/volumes/{id}` · `DELETE /v1/volumes/{id}`.
+- Attach to a session by passing `"volumeId":"<id>"` at `POST /v1/sessions`; it is
+  mounted **read-write at `/memory`** for every step. Only one session may hold a
+  volume RW at a time (others get `409`). Per-volume quota 512 MiB.
+
+```bash
+# remember across sessions via a volume
+VID=$(curl -s -X POST https://isobox.hsingh.app/v1/volumes -d '{"name":"mem"}' | jq -r .id)
+S=$(curl -s -X POST https://isobox.hsingh.app/v1/sessions -d "{\"runtime\":\"python\",\"volumeId\":\"$VID\"}")
+ID=$(echo "$S"|jq -r .id); TOK=$(echo "$S"|jq -r .token)
+curl -s -X POST https://isobox.hsingh.app/v1/sessions/$ID/exec -H "X-Session-Token: $TOK" \
+  -d '{"code":"open(\"/memory/note.txt\",\"w\").write(\"recall me later\")"}'
+# a LATER session attaching the same volume sees /memory/note.txt
+
+# structured KV
+curl -s -X PUT https://isobox.hsingh.app/v1/memory/facts/pi --data-binary '3.14159'
+curl -s https://isobox.hsingh.app/v1/memory/facts/pi    # -> 3.14159
+```
+
+## Live-kernel sessions (persistent variables)
+
+Add `"type":"kernel"` at `POST /v1/sessions` (default is `"filesystem"`). A kernel
+session keeps a long-lived Python interpreter, so **variables, imports, and
+definitions persist across `exec` steps** (Code-Interpreter style) and steps are
+near-instant (a warm process, not a fresh container per step). Same hardening as
+every sandbox (network off by default, read-only rootfs, non-root, capped). Same
+exec / fs / DELETE endpoints; `/workspace` and an attached `/memory` volume still
+work. Kernels are a scarce resource (a small fixed pool); creating one past the
+cap returns `429`. Idle kernels are reaped (~30 min). Note: a step that BLOCKS
+past its wall-time (e.g. `time.sleep(1e9)`) terminates the kernel session — keep
+long waits bounded.
+
+```bash
+S=$(curl -s -X POST https://isobox.hsingh.app/v1/sessions -d '{"runtime":"python","type":"kernel"}')
+ID=$(echo "$S"|jq -r .id); TOK=$(echo "$S"|jq -r .token)
+curl -s -X POST https://isobox.hsingh.app/v1/sessions/$ID/exec -H "X-Session-Token: $TOK" -d '{"code":"import numpy as np; arr = np.arange(10)"}'
+curl -s -X POST https://isobox.hsingh.app/v1/sessions/$ID/exec -H "X-Session-Token: $TOK" -d '{"code":"print(arr.sum())"}'   # -> 45  (arr persisted)
+```

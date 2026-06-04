@@ -20,6 +20,10 @@ type createSessionRequest struct {
 	Runtime  string `json:"runtime"`
 	TTLSec   int    `json:"ttlSec"`
 	VolumeID string `json:"volumeId"` // OPTIONAL: a memory volume to attach RW at /memory.
+	// Type selects the session kind: "" / "filesystem" (default, zero-RAM at rest)
+	// or "kernel" (Phase 4: a resident container with a persistent Python namespace
+	// so variables/imports survive across exec steps). Defaulted server-side.
+	Type string `json:"type"`
 }
 
 // reqTenant pulls the server-derived tenant from the context authMiddleware set.
@@ -61,25 +65,37 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Mint the session FIRST so we have its id to use as the RW lock holder, then
-	// attach the requested volume. volumeId from the body is ONLY ever the `id`
-	// arg to Attach(tenant, ...) — it never derives or overrides the tenant, so a
-	// volume of another tenant fails the key(tenant,id) lookup with ErrVolNotFound
-	// (404), not a cross-tenant attach. On attach failure we roll the session back.
+	stype := req.Type
+	if stype == "" {
+		stype = "filesystem"
+	}
+
+	// KERNEL sessions bake their /workspace + /memory binds into a LONG-LIVED
+	// container at Create time, so a /memory volume must be attached BEFORE Create
+	// (a post-Create attach would never appear in the already-running kernel).
+	// We PRE-MINT the session id here so it is the RW-lock holder passed to Attach;
+	// the holder MUST equal the final session id or OnDrop's ReleaseAll(id) could
+	// never clear the lock. The id is passed via CreateOpts.ID (handler-set, never
+	// from request JSON). On any failure before/at Create we release the hold so we
+	// never leak a lock on a session we don't return.
+	if stype == "kernel" {
+		s.createKernelSession(w, r, tenant, req)
+		return
+	}
+
+	// FILESYSTEM path (unchanged): mint the session FIRST so we have its id to use
+	// as the RW lock holder, then attach the requested volume. volumeId from the
+	// body is ONLY ever the `id` arg to Attach(tenant, ...) — it never derives or
+	// overrides the tenant, so a volume of another tenant fails the key(tenant,id)
+	// lookup with ErrVolNotFound (404), not a cross-tenant attach. On attach
+	// failure we roll the session back.
 	sess, err := s.Sessions.Create(req.Runtime, session.CreateOpts{
 		TTL:    time.Duration(req.TTLSec) * time.Second,
 		Tenant: tenant,
+		Type:   stype,
 	})
 	if err != nil {
-		switch {
-		case errors.Is(err, session.ErrTooMany):
-			w.Header().Set("Retry-After", "5")
-			writeJSON(w, http.StatusTooManyRequests, map[string]any{"error": "too_many_sessions"})
-		case errors.Is(err, session.ErrDiskFull):
-			writeJSON(w, http.StatusInsufficientStorage, map[string]any{"error": "storage_full", "detail": "session storage ceiling reached"})
-		default:
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "create_failed", "detail": err.Error()})
-		}
+		writeCreateSessErr(w, err)
 		return
 	}
 
@@ -113,6 +129,65 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// createKernelSession handles type="kernel" Create: it pre-mints the id, attaches
+// any /memory volume RW under that id, then Creates the kernel with the /memory
+// mount baked in via ExtraMounts. On any failure it releases the volume hold so a
+// kernel we never return cannot leak the RW lock.
+func (s *Server) createKernelSession(w http.ResponseWriter, _ *http.Request, tenant string, req createSessionRequest) {
+	id := session.MintID()
+
+	var extra []executor.Mount
+	if req.VolumeID != "" {
+		if s.Volumes == nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "volumes_disabled"})
+			return
+		}
+		hostPath, _, aerr := s.Volumes.Attach(tenant, req.VolumeID, id, true)
+		if aerr != nil {
+			writeVolErr(w, aerr)
+			return
+		}
+		extra = []executor.Mount{{HostPath: hostPath, Target: "/memory", RW: true}}
+	}
+
+	sess, err := s.Sessions.Create(req.Runtime, session.CreateOpts{
+		TTL:         time.Duration(req.TTLSec) * time.Second,
+		Tenant:      tenant,
+		Type:        "kernel",
+		ID:          id,
+		ExtraMounts: extra,
+	})
+	if err != nil {
+		if req.VolumeID != "" && s.Volumes != nil {
+			s.Volumes.Release(tenant, req.VolumeID, id) // never leak the RW hold on a kernel we don't return
+		}
+		writeCreateSessErr(w, err)
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, createSessionResponse{
+		ID: sess.ID, Token: sess.Token, Runtime: sess.Runtime, Type: sess.Type, CreatedAt: sess.CreatedAt,
+	})
+}
+
+// writeCreateSessErr maps Create errors (filesystem + kernel) to HTTP responses.
+func writeCreateSessErr(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, session.ErrTooMany):
+		w.Header().Set("Retry-After", "5")
+		writeJSON(w, http.StatusTooManyRequests, map[string]any{"error": "too_many_sessions"})
+	case errors.Is(err, session.ErrDiskFull):
+		writeJSON(w, http.StatusInsufficientStorage, map[string]any{"error": "storage_full", "detail": "session storage ceiling reached"})
+	case errors.Is(err, session.ErrKernelDisabled):
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "kernel_disabled", "detail": "kernel sessions are not available on this backend"})
+	case errors.Is(err, session.ErrKernelBusy):
+		w.Header().Set("Retry-After", "5")
+		writeJSON(w, http.StatusTooManyRequests, map[string]any{"error": "kernel_busy", "detail": "no free kernel slot"})
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "create_failed", "detail": err.Error()})
+	}
+}
+
 // POST /v1/sessions/{id}/exec — run one step sharing the session /workspace.
 func (s *Server) handleSessionExec(w http.ResponseWriter, r *http.Request) {
 	id, token := chi.URLParam(r, "id"), sessionToken(r)
@@ -120,14 +195,31 @@ func (s *Server) handleSessionExec(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	runtime, err := s.Sessions.Runtime(id, token, tenant) // token + tenant checked
+	// IsKernel authes (token + tenant constant-time checked) and tells us whether to
+	// route to the resident-kernel exec path (code framed over docker-attach into a
+	// persistent namespace) instead of building a fresh-container spec.
+	isK, err := s.Sessions.IsKernel(id, token, tenant)
 	if err != nil {
 		writeSessErr(w, err)
 		return
 	}
+	// Decode the request body ONCE here; both paths read from it.
 	var req execRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_json", "detail": err.Error()})
+		return
+	}
+
+	// KERNEL path: a kernel needs neither runtime Resolve nor buildSpec — code is
+	// exec()'d into the live namespace. Variables/imports persist across steps.
+	if isK {
+		s.handleKernelExec(w, r, id, token, tenant, req)
+		return
+	}
+
+	runtime, err := s.Sessions.Runtime(id, token, tenant) // token + tenant checked
+	if err != nil {
+		writeSessErr(w, err)
 		return
 	}
 	lang, ok := s.Reg.Resolve(runtime, "") // the session's own runtime; caller cannot change it
@@ -175,6 +267,55 @@ func (s *Server) handleSessionExec(w http.ResponseWriter, r *http.Request) {
 		resp.Warning = "network requested but currently unavailable (egress firewall not verified); ran with network OFF"
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleKernelExec runs one step inside a resident kernel session: the snippet is
+// framed over the docker-attach channel into the kernel's PERSISTENT namespace, so
+// variables/imports survive across calls (Code-Interpreter parity). The request
+// body has already been decoded (and the session token+tenant checked) by the
+// caller. `code` comes from req.Code, falling back to the first file's content.
+// stepMs is the caller's per-step wall deadline (clamped engine-side). Supports
+// both SSE streaming and a buffered JSON result.
+func (s *Server) handleKernelExec(w http.ResponseWriter, r *http.Request, id, token, tenant string, req execRequest) {
+	code := req.Code
+	if code == "" && len(req.Files) > 0 {
+		code = req.Files[0].Content
+	}
+	if code == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "no_source", "detail": "provide `code`"})
+		return
+	}
+	stepMs := 0
+	if req.Limits != nil && req.Limits.WallTimeMs != nil {
+		stepMs = *req.Limits.WallTimeMs
+	}
+
+	if wantsSSE(r) {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "streaming_unsupported"})
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("X-Accel-Buffering", "no")
+		w.WriteHeader(http.StatusOK)
+		sink := &sseSink{w: w, flusher: flusher}
+		res, err := s.Sessions.KernelExec(r.Context(), id, token, tenant, code, stepMs, sink)
+		if err != nil {
+			sink.event("error", map[string]any{"error": err.Error()})
+			return
+		}
+		sink.event("done", map[string]any{"backend": s.Exec.Name(), "type": "kernel", "run": toRunResult(res)})
+		return
+	}
+
+	res, err := s.Sessions.KernelExec(r.Context(), id, token, tenant, code, stepMs, nil)
+	if err != nil {
+		writeSessErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, execResponse{Backend: s.Exec.Name(), Run: toRunResult(res)})
 }
 
 // GET /v1/sessions/{id}/fs?path=...  — dir => JSON listing, file => raw bytes.
@@ -274,6 +415,13 @@ func writeSessErr(w http.ResponseWriter, err error) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_path"})
 	case errors.Is(err, session.ErrIsDir):
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "is_a_directory"})
+	case errors.Is(err, session.ErrKernelDisabled):
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "kernel_disabled", "detail": "kernel sessions are not available on this backend"})
+	case errors.Is(err, session.ErrKernelBusy):
+		w.Header().Set("Retry-After", "5")
+		writeJSON(w, http.StatusTooManyRequests, map[string]any{"error": "kernel_busy", "detail": "no free kernel slot"})
+	case errors.Is(err, session.ErrWrongType):
+		writeJSON(w, http.StatusConflict, map[string]any{"error": "wrong_session_type", "detail": "operation not valid for this session type"})
 	case errors.Is(err, os.ErrNotExist):
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "not_found"})
 	default:
