@@ -194,3 +194,5 @@ Attach via `"volumeId"` at `POST /v1/sessions` → mounted RW at `/memory` for e
 ## Live-kernel sessions (persistent variables)
 
 `POST /v1/sessions` with `"type":"kernel"` (default `"filesystem"`) keeps a long-lived interpreter so **variables/imports persist across `exec` steps** (Code-Interpreter style), and steps are near-instant. Same hardening, same exec/fs/DELETE endpoints, `/workspace` + attached `/memory` still work. Kernels are pool-capped (`ISOBOX_KERNEL_SLOTS`, default 3) → `429` past the cap; idle-reaped (~30 min). A step that *blocks* past its wall-time ends the kernel (bounded; keep waits short).
+
+> **Memory auth:** on the public demo `/v1/memory` + `/v1/volumes` require an API key (`X-API-Key`); `/execute` + `/v1/sessions` stay open. Set `ISOBOX_MEMORY_REQUIRE_KEY=1` to enable this gate when self-hosting.

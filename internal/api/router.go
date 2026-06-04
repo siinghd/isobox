@@ -58,6 +58,14 @@ type Server struct {
 	// gate that never derives a tenant).
 	Keys *auth.KeyStore
 
+	// RequireAuth: if true, a request with no API key is rejected (401) instead of
+	// running as the shared public tenant. Default false (open). MemoryRequireKey:
+	// if true, /v1/memory + /v1/volumes require a real (non-public) tenant — i.e. an
+	// API key — so anonymous callers can't share/abuse public memory, while the rest
+	// of the API stays open.
+	RequireAuth      bool
+	MemoryRequireKey bool
+
 	AcquireWait time.Duration // max wait for a concurrency slot before 429
 	ipLimiter   *ipLimiter
 }
@@ -124,6 +132,7 @@ func (s *Server) Router(cfg Config) http.Handler {
 		r.Group(func(r chi.Router) {
 			r.Use(s.ipLimiter.middleware)
 			r.Use(s.authMiddleware)
+			r.Use(s.requireTenantKey)
 			r.With(maxBody(maxBodyBytes)).Post("/v1/volumes", s.handleCreateVolume)
 			r.Get("/v1/volumes", s.handleListVolumes)
 			r.Get("/v1/volumes/{id}", s.handleGetVolume)
@@ -137,6 +146,7 @@ func (s *Server) Router(cfg Config) http.Handler {
 		r.Group(func(r chi.Router) {
 			r.Use(s.ipLimiter.middleware)
 			r.Use(s.authMiddleware)
+			r.Use(s.requireTenantKey)
 			r.With(maxBody(maxKVValue)).Put("/v1/memory/{namespace}/{key}", s.handleKVPut)
 			r.Get("/v1/memory/{namespace}/{key}", s.handleKVGet)
 			r.Delete("/v1/memory/{namespace}/{key}", s.handleKVDelete)
@@ -168,12 +178,44 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 				key = b[7:]
 			}
 		}
-		tenant, ok := s.Keys.Resolve(key)
-		if !ok {
-			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
-			return
+		var tenant string
+		if key == "" {
+			// No key: open access as the shared public tenant, UNLESS the operator
+			// requires auth globally. Keeps /execute + /v1/sessions open on the demo
+			// while still allowing keyed (per-tenant) access.
+			if s.RequireAuth {
+				writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+				return
+			}
+			tenant = auth.PublicTenant
+		} else {
+			t, ok := s.Keys.Resolve(key)
+			if !ok {
+				writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+				return
+			}
+			tenant = t
 		}
 		next.ServeHTTP(w, r.WithContext(auth.WithTenant(r.Context(), tenant)))
+	})
+}
+
+// requireTenantKey gates an endpoint on a real (non-public) tenant when
+// MemoryRequireKey is set — i.e. a valid API key was supplied. Used for
+// persistent memory/volumes so anonymous callers can't share/abuse the public
+// tenant, while the rest of the API stays open.
+func (s *Server) requireTenantKey(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.MemoryRequireKey {
+			if t, _ := auth.TenantFrom(r.Context()); t == "" || t == auth.PublicTenant {
+				writeJSON(w, http.StatusForbidden, map[string]any{
+					"error":  "api_key_required",
+					"detail": "persistent memory requires an API key (X-API-Key or Bearer); the rest of the API is open",
+				})
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
 	})
 }
 

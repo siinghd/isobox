@@ -272,3 +272,7 @@ ID=$(echo "$S"|jq -r .id); TOK=$(echo "$S"|jq -r .token)
 curl -s -X POST https://isobox.hsingh.app/v1/sessions/$ID/exec -H "X-Session-Token: $TOK" -d '{"code":"import numpy as np; arr = np.arange(10)"}'
 curl -s -X POST https://isobox.hsingh.app/v1/sessions/$ID/exec -H "X-Session-Token: $TOK" -d '{"code":"print(arr.sum())"}'   # -> 45  (arr persisted)
 ```
+
+## Note: memory requires a key (this deployment)
+
+On the public demo, `/v1/memory` and `/v1/volumes` require an API key (`X-API-Key: <key>` or `Authorization: Bearer <key>`) so memory is per-tenant isolated; `/execute` and `/v1/sessions` remain open. Self-hosters: keys are optional unless `ISOBOX_MEMORY_REQUIRE_KEY=1` (then memory needs a key) or `ISOBOX_REQUIRE_AUTH=1` (then everything does).
