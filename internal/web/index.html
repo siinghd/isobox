@@ -74,23 +74,31 @@
   .cursor::after{content:'▌';color:var(--accent);animation:blink 1s step-end infinite;margin-left:1px}
   @keyframes blink{50%{opacity:0}}
 
-  /* code-interpreter run cards */
-  .ci{margin:11px 0;border:1px solid var(--border);border-radius:11px;overflow:hidden;background:var(--panel)}
-  .ci-head{display:flex;align-items:center;gap:8px;padding:8px 13px;background:var(--panel2);border-bottom:1px solid var(--border);font-size:12.5px;color:var(--muted)}
-  .ci-head .lang{color:var(--accent);font-weight:600;font-family:var(--mono)}
-  .ci-head .spacer{flex:1}
-  .ci-head .meta{font-family:var(--mono);font-size:11.5px}
-  .ci-code{margin:0;padding:12px 14px;overflow:auto;font:12.5px/1.5 var(--mono);white-space:pre;background:#0a0d14;color:#cfd6e4}
-  .ci-out{margin:0;padding:11px 14px;border-top:1px solid var(--border);overflow:auto;font:12.5px/1.5 var(--mono);white-space:pre-wrap;word-break:break-word;max-height:340px}
-  .ci-out .label{display:block;font-family:system-ui,sans-serif;font-size:11px;color:var(--muted);letter-spacing:.4px;text-transform:uppercase;margin:0 0 4px}
-  .ci-out .label.err{color:var(--err)}
-  .ci-out .stderr{color:var(--err)}
-  .ci-out.running{color:var(--accent)}
-  .ci-badges{display:flex;gap:6px;flex-wrap:wrap}
+  /* run-result badges (used by notebook cells) */
   .badge{font-size:11px;padding:2px 8px;border-radius:999px;border:1px solid var(--border);color:var(--muted);font-family:var(--mono)}
   .badge.ok{color:var(--ok);border-color:#1c5b45}
   .badge.err{color:var(--err);border-color:#5b1f1f}
   .badge.warn{color:var(--warn);border-color:#5b4a1c}
+
+  /* runnable notebook cells — flux-md code blocks made editable + runnable */
+  .cell-ctrl{display:inline-flex;gap:6px;margin-left:auto}
+  .flux-code-header{align-items:center}
+  .cell-btn{font:inherit;font-size:11.5px;line-height:1;color:var(--fg);background:var(--panel2);border:1px solid var(--border);border-radius:7px;padding:5px 10px;cursor:pointer;white-space:nowrap;transition:border-color .15s,opacity .15s}
+  .cell-btn:hover{border-color:var(--accent)}
+  .cell-btn.run{color:#06101c;background:linear-gradient(135deg,var(--accent),var(--accent2));border:none;font-weight:600}
+  .cell-btn:disabled{opacity:.45;cursor:default}
+  .cell-src{display:block;width:100%;resize:vertical;border:none;outline:none;background:#0a0d14;color:#cfd6e4;font:12.5px/1.55 var(--mono);padding:12px 14px;white-space:pre;overflow:auto;tab-size:4;min-height:2.2em}
+  .cell-src:focus{box-shadow:inset 0 0 0 1px var(--accent)}
+  .cell-out{margin:0;border-top:1px solid var(--border);padding:11px 14px;overflow:auto;font:12.5px/1.5 var(--mono);white-space:pre-wrap;word-break:break-word;max-height:360px;background:var(--panel)}
+  .cell-out.running{color:var(--accent)}
+  .cell-out .label{display:block;font-family:system-ui,sans-serif;font-size:11px;color:var(--muted);letter-spacing:.4px;text-transform:uppercase;margin:0 0 4px}
+  .cell-out .label.err{color:var(--err)}
+  .cell-out .stderr{color:var(--err)}
+  .cell-badges{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+
+  /* header auto-run toggle */
+  .toggle{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:var(--muted);cursor:pointer;user-select:none;white-space:nowrap}
+  .toggle input{accent-color:var(--accent);width:15px;height:15px;cursor:pointer;margin:0}
 
   .sys-note{max-width:860px;margin:6px auto;padding:9px 14px;color:var(--warn);font-size:13px;border:1px solid #5b4a1c;border-radius:10px;background:rgba(255,209,102,.06)}
   .sys-note.err{color:var(--err);border-color:#5b1f1f;background:rgba(255,107,107,.06)}
@@ -120,10 +128,10 @@
 <body>
 <header>
   <div class="logo"><b>isobox</b> chat</div>
-  <div class="tag">model writes Python → runs in a sandboxed kernel</div>
+  <div class="tag">python + shell · runs in a gVisor sandbox</div>
   <div class="spacer"></div>
+  <label class="toggle" title="On: the model's code runs automatically and results feed back. Off: you click ▶ Run on each cell."><input type="checkbox" id="autorun" checked> Auto-run</label>
   <span class="kstat" id="kstat"><span class="kdot"></span><span id="kstat-text">kernel idle</span></span>
-  <select id="model" title="model"></select>
   <button class="btn-ghost" id="reset" title="Reset kernel + clear conversation">Reset</button>
   <a class="gh" href="https://github.com/siinghd/isobox" target="_blank" rel="noopener">★ GitHub</a>
 </header>
@@ -132,7 +140,7 @@
   <div class="thread" id="thread">
     <div class="welcome" id="welcome">
       <h2>Chat with a code interpreter</h2>
-      <p>Ask anything. When the model writes a Python block, it auto-runs in a persistent isobox kernel — variables and imports carry across the whole conversation. It has <code>requests</code>, <code>httpx</code>, <code>bs4</code>, <code>pandas</code>, <code>numpy</code>, and live internet.</p>
+      <p>Ask anything. The model writes <b>Python</b> or <b>shell</b> (<code>curl</code>, <code>jq</code>, <code>git</code>…) that runs in a persistent gVisor sandbox sharing one filesystem across the whole chat. Every code block is an <b>editable, re-runnable cell</b> — edit it and hit <b>▶ Run</b>, or leave Auto-run on. Has <code>requests</code>, <code>bs4</code>, <code>pandas</code>, <code>numpy</code> + live internet.</p>
       <div class="chips" id="chips"></div>
     </div>
   </div>
@@ -149,7 +157,7 @@
       <span>·</span>
       <span><kbd>Enter</kbd> send · <kbd>Shift</kbd>+<kbd>Enter</kbd> newline</span>
       <span>·</span>
-      <span>code interpreter loops up to 5×/turn</span>
+      <span>python + shell cells · editable &amp; re-runnable</span>
     </div>
   </div>
 </div>
@@ -160,35 +168,36 @@ import "/assets/flux-md.js"; // import alone registers the <flux-markdown> custo
 /* ─────────────────────────────  config  ───────────────────────────── */
 const AI_BASE = "https://ai.hsingh.app";          // OpenAI-compatible, wildcard CORS, no key
 const ISOBOX  = "";                                // same-origin: /v1/sessions, /v1/sessions/{id}/exec
-const PREFERRED_MODELS = [                          // first one present wins as the default
-  "openai/gpt-oss-120b:free",
-  "qwen/qwen3-coder:free",
-  "qwen/qwen3-next-80b-a3b-instruct:free",
-  "meta-llama/llama-3.3-70b-instruct:free",
-];
 const MAX_TOOL_ITERS = 5;     // model completions per user turn (agentic loop cap)
 const KERNEL_WALL_MS = 20000; // per-exec wall time
 
-const SYSTEM_PROMPT = `You are a helpful AI assistant with a built-in **Python code interpreter** running in a secure isobox sandbox (gVisor).
+const SYSTEM_PROMPT = `You are an AI assistant with a real, persistent Linux code interpreter — a gVisor-sandboxed container you fully control. Treat it like your own machine.
 
-Tools and capabilities:
-- To run Python, write a fenced code block with the language tag \`python\`. It executes automatically and the captured stdout/stderr is returned to you; then you continue.
-- The kernel is PERSISTENT across the whole conversation: variables, imports, and function definitions you define in one block are available in later blocks and later turns.
-- The kernel has internet access. Pre-installed: requests, httpx, bs4 (BeautifulSoup), lxml, pandas, numpy. You may pip-install more only if truly needed.
-- Use the interpreter for anything computational: math, data wrangling, fetching/scraping live data, parsing, simulations, verifying your own answers.
+What you can run:
+- A \`python\` block runs Python. Pre-installed: requests, httpx, bs4 (BeautifulSoup), lxml, pandas, numpy, and more.
+- A \`bash\` block runs a real shell with curl, wget, jq, git, ripgrep, unzip and the usual coreutils.
+- Both share ONE filesystem and working directory, and PERSIST across blocks and turns: a file written or a variable defined in one block is still there in the next.
+- The sandbox has live internet access.
+
+How execution works:
+- Each fenced code block becomes a runnable cell. With Auto-run on it executes immediately and the captured stdout/stderr comes back to you; otherwise the user clicks ▶ Run. Either way you then SEE the real output before continuing.
+- Surface results explicitly: \`print()\` in Python, or normal command output in bash. Nothing is auto-echoed.
 
 Rules:
-- Only \`python\` code blocks run. Put runnable code in a single block; \`print()\` whatever you want to see (the kernel does NOT auto-echo the last expression — print explicitly).
-- After you see the execution output, interpret it for the user in plain language. Do not just dump raw output.
-- If code errors, read the traceback and fix it in a new block.
-- Keep individual code steps fast (a step that blocks past ~20s is killed). Do not write infinite loops or long sleeps.
-- When no computation is needed, just answer directly in Markdown — do not run code gratuitously.`;
+- You have NO knowledge of live or current data and you CANNOT recall any website's contents from memory. For ANYTHING involving live/current data, fetching, scraping, files, system state, math, or data analysis, you MUST write a code block that actually obtains it. NEVER fabricate, guess, or recall results — get them with code.
+- Do NOT narrate that you will run something and then stop ("Let's fetch", "Let me write code"). Emit the actual code block in the same message.
+- After you see a result, interpret it for the user in plain language; do not just dump raw output.
+- If a block errors, read the traceback/stderr and fix it in a new block.
+- Pick the right tool: shell (\`bash\`) for system tasks, downloads, quick HTTP, file ops; Python for parsing, data, and logic. They share state, so you can combine them.
+- Prefer an official JSON API over fragile HTML scraping when one exists (e.g. a site's public API endpoint) — it is more reliable than guessing CSS selectors.
+- Keep each step fast — a step running past ~20s is killed. No infinite loops or long sleeps.
+- Only reply without code for purely conversational messages (greetings, clarification).`;
 
 const STARTERS = [
   { t:"Live data", q:"Fetch the current price of Bitcoin in USD from a public API and tell me the value." },
-  { t:"Math + verify", q:"What's the 50th Fibonacci number? Compute it with code and show the result." },
+  { t:"Shell", q:"Use a bash block: curl https://api.github.com/repos/torvalds/linux and print the star count with jq." },
   { t:"Data analysis", q:"Load the iris dataset from https://raw.githubusercontent.com/mwaskom/seaborn-data/master/iris.csv and show the mean sepal length per species." },
-  { t:"Scrape", q:"Scrape the top 5 story titles from Hacker News and list them." },
+  { t:"Hacker News", q:"List the current top 5 Hacker News story titles using the official Hacker News API." },
 ];
 
 /* ─────────────────────────────  state  ───────────────────────────── */
@@ -198,35 +207,27 @@ let kernelDisabled = false;
 let abortCtl = null;      // AbortController for the in-flight LLM fetch
 let stopRequested = false;
 let busy = false;
+let autoRun = true;       // run the model's code automatically + feed results back
+// Serialize ALL kernel execs (auto-run + manual cell runs) so two clicks never
+// interleave in the one persistent kernel.
+let kchain = Promise.resolve();
+function kernelExec(payload){
+  const p = kchain.then(() => runInKernel(payload));
+  kchain = p.catch(() => {});
+  return p;
+}
 
 /* ─────────────────────────────  dom  ───────────────────────────── */
 const $ = s => document.querySelector(s);
 const thread = $("#thread"), main = $("#main"), welcome = $("#welcome");
-const modelSel = $("#model"), promptEl = $("#prompt"), sendBtn = $("#send");
+const promptEl = $("#prompt"), sendBtn = $("#send");
 const kstat = $("#kstat"), kstatText = $("#kstat-text");
 
 function scrollDown(){ main.scrollTop = main.scrollHeight; }
 function setKernel(state, text){ kstat.className = "kstat " + (state||""); kstatText.textContent = text; }
 
-/* ─────────────────────────────  model picker  ───────────────────────────── */
-async function loadModels(){
-  modelSel.innerHTML = "";
-  const add = (id,label)=>{ const o=document.createElement("option"); o.value=id; o.textContent=label||id; modelSel.appendChild(o); };
-  add("auto","auto (auto-route)");
-  try{
-    const r = await fetch(AI_BASE + "/v1/models");
-    const j = await r.json();
-    const ids = (j.data||[]).map(m=>m.id).filter(id => typeof id==="string" && id.endsWith(":free")).sort();
-    for(const id of ids) add(id);
-    // default: first preferred id that actually exists, else auto
-    const def = PREFERRED_MODELS.find(p => ids.includes(p));
-    modelSel.value = def || "auto";
-  }catch(e){
-    // keep auto + the preferred list as a fallback so the picker is never empty
-    for(const id of PREFERRED_MODELS) add(id);
-    modelSel.value = "auto";
-  }
-}
+// ai.hsingh.app auto-routes to the best available model — no model picker needed.
+const MODEL = "auto";
 
 /* ─────────────────────────────  rendering helpers  ───────────────────────────── */
 function el(tag, cls, text){ const e=document.createElement(tag); if(cls)e.className=cls; if(text!=null)e.textContent=text; return e; }
@@ -257,7 +258,25 @@ function addAssistantBubble(){
   content.appendChild(md);              // MUST be connected before append()/finalize()
   content.classList.add("cursor");
   scrollDown();
-  return { content, md };
+  return { node: m, content, md };
+}
+
+// Some routed models (notably gpt-oss) occasionally stream only a reasoning
+// preamble ("We'll fetch … and extract the titles.") and stop, with no code.
+// Detect that so the loop can nudge + retry instead of dead-ending. A genuine
+// prose answer (long, or no future-action framing) is NOT a stall.
+function isStall(t){
+  const s = (t || "").trim();
+  if(s.length === 0) return true;
+  if(s.includes("```")) return false;  // has a fence → real (defensive; shouldn't reach)
+  if(s.length > 240) return false;     // substantive answer, not a preamble
+  // Must mention an action — otherwise it's conversational (greeting/clarification), leave it.
+  const action = /\b(fetch\w*|scrap\w*|extract\w*|comput\w*|calculat\w*|run\w*|execut\w*|get\w*|grab\w*|download\w*|pull\w*|quer\w*|retriev\w*|gather\w*|load\w*|request\w*|call\w*|writ\w*|us\w*|check\w*|look\w*|find\w*|pars\w*|build\w*|curl)\b/i;
+  if(!action.test(s)) return false;
+  // …framed as an intention/in-progress action (future or gerund-led) rather than a result.
+  const future = /\b(we'?ll|i'?ll|i will|we will|let'?s|let me|i'?m|we'?re|going to|gonna|i can|i'?d|here'?s|first|next|now|okay|sure|alright)\b/i;
+  const gerundLead = /^[A-Z][a-z]+ing\b/.test(s);   // "Fetching …", "Computing …", "Scraping …"
+  return future.test(s) || gerundLead;
 }
 
 function sysNote(text, isErr){
@@ -274,10 +293,10 @@ function sysNote(text, isErr){
 async function streamCompletion(bubble){
   abortCtl = new AbortController();
   const body = {
-    model: modelSel.value || "auto",
+    model: MODEL,
     messages: messages.map(m => ({ role: m.role, content: m.content })),
     stream: true,
-    temperature: 0.4,
+    temperature: 0.25,
   };
   const r = await fetch(AI_BASE + "/v1/chat/completions", {
     method:"POST",
@@ -317,18 +336,6 @@ async function streamCompletion(bubble){
   bubble.md.finalize();
   bubble.content.classList.remove("cursor");
   return full;
-}
-
-/* ─────────────────────────────  code-block extraction  ───────────────────────────── */
-// Pull fenced ```python blocks (also "py") out of assistant markdown, in order.
-function extractPythonBlocks(md){
-  const re = /```[ \t]*(python|py)[ \t]*\r?\n([\s\S]*?)```/gi;
-  const blocks = []; let m;
-  while((m = re.exec(md)) !== null){
-    const code = m[2].replace(/\s+$/,"");
-    if(code.trim()) blocks.push(code);
-  }
-  return blocks;
 }
 
 /* ─────────────────────────────  kernel session  ───────────────────────────── */
@@ -389,44 +396,6 @@ async function runInKernel(code, allowRecreate=true){
   return j.run || {};
 }
 
-/* ─────────────────────────────  code-interpreter run card  ───────────────────────────── */
-function addRunCard(code){
-  const card = el("div","ci");
-  const head = el("div","ci-head");
-  head.appendChild(el("span","lang","python"));
-  head.appendChild(el("span",null,"code interpreter"));
-  head.appendChild(el("span","spacer"));
-  const badges = el("div","ci-badges"); head.appendChild(badges);
-  card.appendChild(head);
-  const pre = el("pre","ci-code"); pre.appendChild(el("code",null,code)); card.appendChild(pre);
-  const out = el("pre","ci-out running","running…");
-  card.appendChild(out);
-  thread.appendChild(card); scrollDown();
-  return { card, out, badges };
-}
-
-function fillRunCard(ui, run){
-  ui.out.classList.remove("running");
-  ui.out.textContent = "";
-  const stdout = (run.stdout||""), stderr = (run.stderr||"");
-  if(stdout){
-    ui.out.appendChild(el("span","label","stdout"));
-    ui.out.appendChild(document.createTextNode(stdout));
-  }
-  if(stderr){
-    if(stdout) ui.out.appendChild(document.createTextNode("\n"));
-    ui.out.appendChild(el("span","label err","stderr"));
-    const s = el("span","stderr"); s.textContent = stderr; ui.out.appendChild(s);
-  }
-  if(!stdout && !stderr) ui.out.appendChild(el("span","label","(no output)"));
-  // badges
-  ui.badges.appendChild(el("span","badge "+(run.exitCode===0?"ok":"err"), "exit "+(run.exitCode??"?")));
-  if(run.timedOut) ui.badges.appendChild(el("span","badge warn","⏱ timed out"));
-  if(run.oomKilled) ui.badges.appendChild(el("span","badge warn","⊘ OOM"));
-  if(run.durationMs!=null) ui.badges.appendChild(el("span","badge", run.durationMs+" ms"));
-  scrollDown();
-}
-
 // Format a run result as a markdown-ish tool message fed back to the model.
 function runToToolText(run){
   const parts = [];
@@ -440,83 +409,241 @@ function runToToolText(run){
   return t;
 }
 
+/* ─────────────────────────────  runnable notebook cells  ─────────────────────────────
+   After a completion finalizes, flux-md has rendered each fenced block as a
+   .flux-code-block (light DOM). We turn the runnable ones (python / bash) into
+   editable, re-runnable cells: an editable <textarea>, a ▶ Run button, an inline
+   output area, and a "↩ Send to chat" button that feeds output back to the model.
+   The same machinery powers Auto-run. */
+const RUNNABLE = /^(python|py|bash|sh|shell|shell-session|console|zsh)$/;
+const isShellLang = l => /^(bash|sh|shell|shell-session|console|zsh)$/.test(l);
+function autosizeTA(ta){ ta.style.height="auto"; ta.style.height=Math.min(ta.scrollHeight+2,460)+"px"; }
+
+// flux-md parses in a Web Worker and renders code blocks ASYNCHRONOUSLY after
+// finalize(): first a plain <pre>, then a second pass that REPLACES the whole
+// block with syntax-highlighted markup. Enhancing between passes gets wiped, so
+// we wait until the blocks are present AND the subtree has been quiet (no
+// mutations) for a beat — i.e. highlighting has settled — before enhancing.
+function countFences(md){ const m = (md||"").match(/^[ \t]*```/gm); return m ? (m.length >> 1) : 0; }
+function waitForStableBlocks(mdEl, expected, quietMs=220, timeoutMs=4000){
+  return new Promise(resolve=>{
+    if(expected <= 0){ resolve(); return; }
+    let quiet=null, hard=null, obs=null, done=false;
+    const finish=()=>{ if(done)return; done=true; if(obs)obs.disconnect(); if(quiet)clearTimeout(quiet); if(hard)clearTimeout(hard); resolve(); };
+    const check=()=>{
+      if(quiet){ clearTimeout(quiet); quiet=null; }
+      if(mdEl.querySelectorAll(".flux-code-block").length >= expected) quiet=setTimeout(finish, quietMs);
+    };
+    obs=new MutationObserver(check);
+    obs.observe(mdEl,{childList:true,subtree:true,characterData:true,attributes:true});
+    hard=setTimeout(finish, timeoutMs);
+    check();
+  });
+}
+
+// Wrap a shell snippet to run inside the SAME persistent python kernel via a
+// subprocess sharing the kernel process's cwd (so a python os.chdir carries
+// over). base64 sidesteps every quoting pitfall in the user's shell text.
+function shellWrap(code){
+  const b64 = btoa(unescape(encodeURIComponent(code)));
+  return [
+    "import base64 as _b64, subprocess as _sp, sys as _sys, os as _os",
+    "_c = _b64.b64decode('" + b64 + "').decode('utf-8')",
+    "_r = _sp.run(['bash','-lc',_c], capture_output=True, text=True, cwd=_os.getcwd())",
+    "_sys.stdout.write(_r.stdout)",
+    "if _r.stderr: _sys.stderr.write(_r.stderr)",
+    "if _r.returncode != 0: _sys.stderr.write(('\\n' if _r.stderr else '') + '[shell exited %d]' % _r.returncode)",
+  ].join("\n");
+}
+
+function renderCellOutput(out, run){
+  out.style.display=""; out.className="cell-out"; out.textContent="";
+  const stdout=(run.stdout||""), stderr=(run.stderr||"");
+  if(stdout){ out.appendChild(el("span","label","stdout")); out.appendChild(document.createTextNode(stdout)); }
+  if(stderr){
+    if(stdout) out.appendChild(document.createTextNode("\n"));
+    out.appendChild(el("span","label err","stderr"));
+    const s=el("span","stderr"); s.textContent=stderr; out.appendChild(s);
+  }
+  if(!stdout && !stderr) out.appendChild(el("span","label","(no output)"));
+  const badges=el("div","cell-badges");
+  badges.appendChild(el("span","badge "+(run.exitCode===0?"ok":"err"), "exit "+(run.exitCode??"?")));
+  if(run.timedOut) badges.appendChild(el("span","badge warn","⏱ timed out"));
+  if(run.oomKilled) badges.appendChild(el("span","badge warn","⊘ OOM"));
+  if(run.durationMs!=null) badges.appendChild(el("span","badge", run.durationMs+" ms"));
+  out.appendChild(badges);
+  scrollDown();
+}
+
+function cellError(out, msg){
+  out.style.display=""; out.className="cell-out"; out.textContent="";
+  out.appendChild(el("span","label err","error"));
+  const s=el("span","stderr"); s.textContent=msg; out.appendChild(s);
+}
+
+// Run one cell in the kernel; render output inline. Stashes the result on the
+// handle. Returns the run object, or null on failure (handle.errMsg is set).
+async function execCell(h){
+  const code = h.getCode();
+  if(!code.trim()) return null;
+  if(kernelDisabled){ cellError(h.out, "kernel sessions are disabled on this backend — code shown only"); return null; }
+  h.runBtn.disabled = true;
+  h.out.style.display=""; h.out.className="cell-out running"; h.out.textContent="running…";
+  const payload = isShellLang(h.lang) ? shellWrap(code) : code;
+  let run;
+  try{
+    run = await kernelExec(payload);
+  }catch(e){
+    cellError(h.out, e.message); h.errMsg = e.message; h.lastRun = null;
+    h.runBtn.disabled = false; h.sendBtn.disabled = false;
+    return null;
+  }
+  renderCellOutput(h.out, run); h.lastRun = run; h.errMsg = null;
+  h.runBtn.disabled = false; h.sendBtn.disabled = false;
+  return run;
+}
+
+// Turn every runnable flux-md code block under `root` into a cell; returns the
+// handles in document order (used by Auto-run).
+function enhanceCells(root){
+  const handles = [];
+  root.querySelectorAll(".flux-code-block:not([data-iso])").forEach(block=>{
+    block.setAttribute("data-iso","1");
+    const langEl = block.querySelector(".flux-code-lang");
+    const lang = ((langEl && langEl.textContent) || "").trim().toLowerCase();
+    if(!RUNNABLE.test(lang)) return;                 // json/text/prose blocks stay inert
+    const codeEl = block.querySelector("code");
+    const code = (codeEl ? codeEl.textContent : "").replace(/\n$/,"");
+
+    // controls in the code header (next to flux-md's copy button)
+    const header = block.querySelector(".flux-code-header") || block;
+    const ctrl = el("div","cell-ctrl");
+    const runBtn = el("button","cell-btn run","▶ Run");
+    const sendBtn = el("button","cell-btn send","↩ Send to chat");
+    sendBtn.disabled = true; sendBtn.title = "Run first, then feed the output back to the model";
+    ctrl.appendChild(runBtn); ctrl.appendChild(sendBtn); header.appendChild(ctrl);
+
+    // editable source replaces the static <pre>
+    const body = block.querySelector(".flux-code-body") || (codeEl && codeEl.closest("pre").parentElement);
+    const ta = el("textarea","cell-src"); ta.value = code; ta.spellcheck = false;
+    ta.setAttribute("aria-label", lang+" code cell");
+    body.innerHTML = ""; body.appendChild(ta);
+    requestAnimationFrame(()=>autosizeTA(ta));
+    ta.addEventListener("input", ()=>autosizeTA(ta));
+    ta.addEventListener("keydown", e=>{
+      if((e.metaKey||e.ctrlKey) && e.key==="Enter"){ e.preventDefault(); runBtn.click(); return; }
+      if(e.key==="Tab"){ e.preventDefault(); const s=ta.selectionStart, en=ta.selectionEnd;
+        ta.value = ta.value.slice(0,s)+"    "+ta.value.slice(en); ta.selectionStart=ta.selectionEnd=s+4; }
+    });
+
+    const out = el("div","cell-out"); out.style.display="none"; block.appendChild(out);
+    const h = { lang, getCode:()=>ta.value, out, runBtn, sendBtn, lastRun:null, errMsg:null, run:()=>execCell(h) };
+    runBtn.addEventListener("click", ()=>execCell(h));
+    sendBtn.addEventListener("click", ()=>sendCellOutput(h));
+    handles.push(h);
+  });
+  return handles;
+}
+
+// Feed one cell's captured output back to the model (Auto-run off path).
+function sendCellOutput(h){
+  if(busy) return;
+  let text;
+  if(h.errMsg) text = "[code interpreter result]\nThe interpreter could not run this block: " + h.errMsg;
+  else if(h.lastRun) text = runToToolText(h.lastRun);
+  else return;
+  continueWithToolOutput(text);
+}
+
 /* ─────────────────────────────  main turn / agentic loop  ───────────────────────────── */
-async function sendTurn(userText){
+// Stream completions; turn each into editable runnable cells. With Auto-run on,
+// execute them and feed results back (looping up to MAX_TOOL_ITERS). With it off,
+// stop after rendering — the user drives each cell with ▶ Run.
+async function runModelLoop(){
+  let stallRetries = 0;
+  for(let iter=0; iter<MAX_TOOL_ITERS; iter++){
+    if(stopRequested) break;
+
+    const bubble = addAssistantBubble();
+    let full;
+    try{
+      full = await streamCompletion(bubble);
+    }catch(e){
+      bubble.content.classList.remove("cursor"); bubble.md.finalize();
+      if(e.name !== "AbortError") sysNote("Model error: " + e.message, true);
+      break;
+    }
+    if(stopRequested){ messages.push({ role:"assistant", content: full }); break; }
+
+    await waitForStableBlocks(bubble.md, countFences(full));  // flux-md renders+highlights async
+    const cells = enhanceCells(bubble.md);
+    if(cells.length === 0){
+      // No runnable code. A bare "We'll fetch…" preamble is a stall → drop the
+      // dead-end bubble, nudge once for code-only, and re-ask. A real prose answer
+      // (isStall false) ends the turn normally.
+      if(isStall(full) && stallRetries < 4){
+        stallRetries++;
+        bubble.node.remove();
+        if(stallRetries === 1){
+          messages.push({ role:"user", content:"Reminder: do NOT describe what you will do. Output ONLY the fenced code block(s) that actually perform the task, right now." });
+        }
+        continue;
+      }
+      messages.push({ role:"assistant", content: full });
+      break;
+    }
+    stallRetries = 0;
+    messages.push({ role:"assistant", content: full });
+
+    if(kernelDisabled){
+      sysNote("The model wrote code, but kernel sessions are disabled on this backend — showing the code only.", true);
+      break;
+    }
+    if(!autoRun) break;   // manual mode: the user runs the cells
+
+    // auto-run every cell, collect outputs, feed back, loop
+    let ranAny = false; const outChunks = [];
+    for(const c of cells){
+      if(stopRequested) break;
+      const r = await c.run();
+      if(r){ outChunks.push(runToToolText(r)); ranAny = true; }
+      else if(c.errMsg){ outChunks.push("[code interpreter result]\nThe interpreter could not run this block: " + c.errMsg); ranAny = true; }
+    }
+    if(!ranAny || stopRequested) break;
+    messages.push({ role:"user", content: outChunks.join("\n\n---\n\n") });
+    if(iter === MAX_TOOL_ITERS - 1) sysNote("Reached the code-interpreter iteration cap ("+MAX_TOOL_ITERS+") for this turn.", false);
+  }
+}
+
+// Shared busy/stop/UI envelope around a model loop.
+async function runWrapped(fn){
   if(busy) return;
   busy = true; stopRequested = false;
   setSendMode("stop");
-  messages.push({ role:"user", content:userText });
-  addUserMsg(userText);
-
-  try{
-    for(let iter=0; iter<MAX_TOOL_ITERS; iter++){
-      if(stopRequested) break;
-
-      // 1) stream a completion
-      const bubble = addAssistantBubble();
-      let full;
-      try{
-        full = await streamCompletion(bubble);
-      }catch(e){
-        bubble.content.classList.remove("cursor");
-        if(e.name === "AbortError"){ bubble.md.finalize(); break; }
-        bubble.md.finalize();
-        sysNote("Model error: " + e.message, true);
-        break;
-      }
-      messages.push({ role:"assistant", content: full });
-
-      if(stopRequested) break;
-
-      // 2) extract + run python blocks
-      const blocks = extractPythonBlocks(full);
-      if(blocks.length === 0) break;            // no code → turn is done
-
-      if(kernelDisabled){
-        sysNote("The model wrote Python, but this isobox backend has no kernel runtime available (kernel sessions are disabled). Showing the code only.", true);
-        break;
-      }
-
-      let hadError = false, ranAny = false;
-      const outChunks = [];
-      for(const code of blocks){
-        if(stopRequested) break;
-        const ui = addRunCard(code);
-        let run;
-        try{
-          run = await runInKernel(code);
-        }catch(e){
-          ui.out.classList.remove("running");
-          ui.out.textContent = "";
-          ui.out.appendChild(el("span","label err","error"));
-          const s = el("span","stderr"); s.textContent = e.message; ui.out.appendChild(s);
-          outChunks.push("[code interpreter result]\nThe interpreter could not run this block: " + e.message);
-          hadError = true; ranAny = true;
-          continue;
-        }
-        fillRunCard(ui, run);
-        outChunks.push(runToToolText(run));
-        ranAny = true;
-        if((run.exitCode && run.exitCode!==0) || run.timedOut || run.oomKilled || (run.stderr||"").trim()) hadError = true;
-      }
-
-      if(!ranAny || stopRequested) break;
-
-      // 3) feed the captured output back to the model as a user message, then loop.
-      messages.push({ role:"user", content: outChunks.join("\n\n---\n\n") });
-
-      if(iter === MAX_TOOL_ITERS - 1){
-        sysNote("Reached the code-interpreter iteration cap ("+MAX_TOOL_ITERS+") for this turn.", false);
-      }
-      // continue loop → model gets to react to the output
-    }
-  } finally {
+  try{ await fn(); }
+  finally{
     busy = false; abortCtl = null;
     setSendMode("send");
     if(kernel) setKernel("live","kernel live");
     else if(!kernelDisabled) setKernel("","kernel idle");
     promptEl.focus();
   }
+}
+
+function sendTurn(userText){
+  return runWrapped(async ()=>{
+    messages.push({ role:"user", content:userText });
+    addUserMsg(userText);
+    await runModelLoop();
+  });
+}
+
+function continueWithToolOutput(text){
+  return runWrapped(async ()=>{
+    messages.push({ role:"user", content:text });
+    sysNote("↳ sent code output back to the model", false);
+    await runModelLoop();
+  });
 }
 
 /* ─────────────────────────────  send / stop button  ───────────────────────────── */
@@ -583,6 +710,11 @@ promptEl.addEventListener("keydown", e=>{
 sendBtn.addEventListener("click", onSendClick);
 $("#reset").addEventListener("click", reset);
 
+/* auto-run toggle */
+const autorunEl = $("#autorun");
+autoRun = autorunEl.checked;
+autorunEl.addEventListener("change", ()=>{ autoRun = autorunEl.checked; });
+
 /* starter chips */
 const chips = $("#chips");
 for(const s of STARTERS){
@@ -594,7 +726,7 @@ for(const s of STARTERS){
 }
 
 /* ─────────────────────────────  init  ───────────────────────────── */
-loadModels();
+
 setKernel("","kernel idle");
 promptEl.focus();
 </script>

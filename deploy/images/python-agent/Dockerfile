@@ -4,9 +4,13 @@
 # work even with the sandbox network OFF (compute); turn network ON to fetch.
 FROM python:3-slim
 
-# A few runtime libs some wheels dlopen (lxml/pillow); curl handy for examples.
+# Runtime libs some wheels dlopen (lxml/pillow) + a real shell toolbelt so the
+# interpreter can act like an OS: curl/wget for HTTP, jq for JSON, git, ripgrep,
+# unzip, ca-certificates for TLS. These power bash/sh code cells, not just Python.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends libxml2 libxslt1.1 ca-certificates \
+ && apt-get install -y --no-install-recommends \
+      libxml2 libxslt1.1 ca-certificates \
+      curl wget jq git ripgrep unzip procps less nano \
  && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir \
