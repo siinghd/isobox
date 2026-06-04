@@ -14,6 +14,7 @@ import (
 	"github.com/siinghd/isobox/internal/auth"
 	"github.com/siinghd/isobox/internal/executor"
 	"github.com/siinghd/isobox/internal/memory"
+	"github.com/siinghd/isobox/internal/queue"
 	"github.com/siinghd/isobox/internal/registry"
 	"github.com/siinghd/isobox/internal/sched"
 	"github.com/siinghd/isobox/internal/session"
@@ -39,6 +40,17 @@ type Server struct {
 	Sessions *session.Manager // stateful sessions (v2); nil disables /v1/sessions
 	Volumes  *memory.Manager  // tier-2 filesystem volumes; nil disables /v1/volumes
 	Memory   *memory.Store    // tier-3 bbolt KV; nil disables /v1/memory
+
+	// Queue is the OPTIONAL job-distribution seam for buffered (non-SSE) /execute.
+	// Default driver is "inproc" — the verbatim direct path — so wiring it changes
+	// nothing on a single node. nil also means the direct path (defensive). The SSE
+	// path never routes through the queue (a broker can't stream live chunks back).
+	Queue queue.Queue
+
+	// Pool is the optional warm-container pool, reported by /metrics. It is the SAME
+	// object set as Exec when enabled; held separately only so /metrics can read its
+	// size without a type assertion. nil => disabled.
+	Pool *executor.WarmPool
 
 	// Keys is the single auth gate: it resolves an API key to a server-derived
 	// tenant id. There is NO separate APIKey field — that second gate was deleted
@@ -81,6 +93,7 @@ func (s *Server) Router(cfg Config) http.Handler {
 	r.Get("/healthz", s.handleHealthz)
 	r.Get("/readyz", s.handleReadyz)
 	r.Get("/runtimes", s.handleRuntimes)
+	r.Get("/metrics", s.handleMetrics)
 
 	// Execution endpoints: body cap -> rate limit -> auth.
 	r.Group(func(r chi.Router) {

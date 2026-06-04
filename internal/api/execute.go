@@ -8,7 +8,10 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/google/uuid"
 	"github.com/siinghd/isobox/internal/executor"
+	"github.com/siinghd/isobox/internal/obs"
+	"github.com/siinghd/isobox/internal/queue"
 	"github.com/siinghd/isobox/internal/registry"
 )
 
@@ -90,25 +93,43 @@ func (s *Server) handleExecute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Global concurrency gate. If saturated, shed load with 429 + Retry-After
-	// rather than piling sandboxes onto a shared host.
-	if !s.Sema.Acquire(r.Context(), s.AcquireWait) {
-		w.Header().Set("Retry-After", "1")
-		writeJSON(w, http.StatusTooManyRequests, map[string]any{"error": "capacity", "detail": "no free execution slot"})
-		return
-	}
-	defer s.Sema.Release()
-
+	// SSE STREAMING stays on the DIRECT path: it acquires the global concurrency
+	// gate inline and runs locally, because a broker cannot stream live stdout
+	// chunks back to this HTTP connection. This is byte-for-byte today's behaviour.
 	if wantsSSE(r) {
+		// Global concurrency gate. If saturated, shed load with 429 + Retry-After.
+		if !s.Sema.Acquire(r.Context(), s.AcquireWait) {
+			w.Header().Set("Retry-After", "1")
+			writeJSON(w, http.StatusTooManyRequests, map[string]any{"error": "capacity", "detail": "no free execution slot"})
+			return
+		}
+		defer s.Sema.Release()
 		s.executeSSE(w, r, lang.Name, lang.Version, spec)
 		return
 	}
 
-	res, err := s.Exec.Execute(r.Context(), spec, nil)
+	// BUFFERED one-shot: route through the Queue seam. The default "inproc" driver
+	// runs the job locally via the Runner, which itself acquires/releases the same
+	// global Sema (returning capacity errors) — so this is identical to the old
+	// direct path on a single node. A "valkey" driver dispatches to a worker pool.
+	res, err := s.Queue.Submit(r.Context(), queue.Job{
+		ID:       uuid.NewString(),
+		Language: lang.Name,
+		Version:  lang.Version,
+		Spec:     spec,
+	})
 	if err != nil {
+		if errors.Is(err, errCapacity) {
+			w.Header().Set("Retry-After", "1")
+			writeJSON(w, http.StatusTooManyRequests, map[string]any{"error": "capacity", "detail": "no free execution slot"})
+			obs.M().ExecTotal("rejected")
+			return
+		}
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "execution_failed", "detail": err.Error()})
+		obs.M().ExecTotal("error")
 		return
 	}
+	obs.M().ExecTotal("ok")
 	resp := execResponse{
 		Language: lang.Name, Version: lang.Version, Backend: s.Exec.Name(),
 		Run: toRunResult(res),
@@ -118,6 +139,10 @@ func (s *Server) handleExecute(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
+
+// errCapacity signals the local concurrency gate is saturated. It is returned by
+// the queue Runner and mapped to 429 + Retry-After by handleExecute.
+var errCapacity = errors.New("no free execution slot")
 
 // executeSSE streams stdout/stderr chunks as Server-Sent Events, then a final
 // `done` event carrying the structured result. Requires the proxy to disable
@@ -137,9 +162,11 @@ func (s *Server) executeSSE(w http.ResponseWriter, r *http.Request, name, versio
 	sink := &sseSink{w: w, flusher: flusher}
 	res, err := s.Exec.Execute(r.Context(), spec, sink)
 	if err != nil {
+		obs.M().ExecTotal("error")
 		sink.event("error", map[string]any{"error": err.Error()})
 		return
 	}
+	obs.M().ExecTotal("ok")
 	done := map[string]any{
 		"language": name, "version": version, "backend": s.Exec.Name(),
 		"run": toRunResult(res),

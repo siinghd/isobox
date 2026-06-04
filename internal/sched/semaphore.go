@@ -6,6 +6,7 @@ package sched
 
 import (
 	"context"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sync/semaphore"
@@ -15,6 +16,12 @@ import (
 type Limiter struct {
 	sem *semaphore.Weighted
 	max int64
+
+	// inUse tracks live holders for the isobox_sema_inuse metric gauge. It is a
+	// bare atomic bumped ONLY on a successful Acquire and dropped on Release, so it
+	// can never drift negative (a failed/timed-out Acquire does not touch it). This
+	// is purely observational — it does not change acquire timing or semantics.
+	inUse atomic.Int64
 }
 
 // New returns a Limiter allowing max concurrent holders.
@@ -30,11 +37,21 @@ func New(max int) *Limiter {
 func (l *Limiter) Acquire(ctx context.Context, wait time.Duration) bool {
 	c, cancel := context.WithTimeout(ctx, wait)
 	defer cancel()
-	return l.sem.Acquire(c, 1) == nil
+	if l.sem.Acquire(c, 1) == nil {
+		l.inUse.Add(1)
+		return true
+	}
+	return false
 }
 
 // Release returns a slot.
-func (l *Limiter) Release() { l.sem.Release(1) }
+func (l *Limiter) Release() {
+	l.sem.Release(1)
+	l.inUse.Add(-1)
+}
 
 // Max reports the configured concurrency ceiling.
 func (l *Limiter) Max() int64 { return l.max }
+
+// InUse reports the number of currently-held slots (for metrics).
+func (l *Limiter) InUse() int64 { return l.inUse.Load() }
