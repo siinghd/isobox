@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"time"
@@ -96,7 +97,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		Type:   stype,
 	})
 	if err != nil {
-		writeCreateSessErr(w, err)
+		writeCreateSessErr(w, tenant, err)
 		return
 	}
 
@@ -163,7 +164,7 @@ func (s *Server) createKernelSession(w http.ResponseWriter, _ *http.Request, ten
 		if req.VolumeID != "" && s.Volumes != nil {
 			s.Volumes.Release(tenant, req.VolumeID, id) // never leak the RW hold on a kernel we don't return
 		}
-		writeCreateSessErr(w, err)
+		writeCreateSessErr(w, tenant, err)
 		return
 	}
 
@@ -173,7 +174,10 @@ func (s *Server) createKernelSession(w http.ResponseWriter, _ *http.Request, ten
 }
 
 // writeCreateSessErr maps Create errors (filesystem + kernel) to HTTP responses.
-func writeCreateSessErr(w http.ResponseWriter, err error) {
+// It also logs the failure — every other kernel lifecycle event is logged, so
+// this closes the silent gap that made capacity/OOM/disk debugging hard.
+func writeCreateSessErr(w http.ResponseWriter, tenant string, err error) {
+	slog.Warn("session create failed", "tenant", tenant, "err", err)
 	switch {
 	case errors.Is(err, session.ErrTooMany):
 		w.Header().Set("Retry-After", "5")

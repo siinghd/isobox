@@ -7,6 +7,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -176,10 +177,13 @@ func (s *Server) Router(cfg Config) http.Handler {
 // Constant-time key comparison happens inside KeyStore.Resolve.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		key := r.Header.Get("X-API-Key")
+		// Trim whitespace so a stray space/newline doesn't hash to a different key
+		// and 401 — configured keys are already trimmed at load (keystore), so this
+		// removes that asymmetry.
+		key := strings.TrimSpace(r.Header.Get("X-API-Key"))
 		if key == "" {
 			if b := r.Header.Get("Authorization"); len(b) > 7 && b[:7] == "Bearer " {
-				key = b[7:]
+				key = strings.TrimSpace(b[7:])
 			}
 		}
 		var tenant string

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -103,7 +104,14 @@ func (g *Gvisor) HealthCheck(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("docker info: %w", err)
 	}
-	if !strings.Contains(string(out), g.Runtime) {
+	// Check for the EXACT runtime key, not a substring — strings.Contains could
+	// false-positive when a different runtime's name contains ours, or on the
+	// JSON envelope itself.
+	var runtimes map[string]json.RawMessage
+	if err := json.Unmarshal(out, &runtimes); err != nil {
+		return fmt.Errorf("parse docker runtimes: %w", err)
+	}
+	if _, ok := runtimes[g.Runtime]; !ok {
 		return fmt.Errorf("docker runtime %q not registered", g.Runtime)
 	}
 	return nil
@@ -428,9 +436,10 @@ func pump(wg *sync.WaitGroup, r io.Reader, w *capWriter, sink func([]byte)) {
 					if int64(k) > room {
 						k = int(room)
 					}
-					c := make([]byte, k)
-					copy(c, buf[:k])
-					sink(c)
+					// Pass the buffer slice directly: the sink MUST consume it
+					// synchronously (sseSink copies to an immutable string before
+					// returning), so we skip a per-chunk alloc+copy on hot output.
+					sink(buf[:k])
 				}
 			}
 			_, _ = w.Write(buf[:n])

@@ -271,7 +271,9 @@ function isStall(t){
   if(s.includes("```")) return false;  // has a fence → real (defensive; shouldn't reach)
   if(s.length > 240) return false;     // substantive answer, not a preamble
   // Must mention an action — otherwise it's conversational (greeting/clarification), leave it.
-  const action = /\b(fetch\w*|scrap\w*|extract\w*|comput\w*|calculat\w*|run\w*|execut\w*|get\w*|grab\w*|download\w*|pull\w*|quer\w*|retriev\w*|gather\w*|load\w*|request\w*|call\w*|writ\w*|us\w*|check\w*|look\w*|find\w*|pars\w*|build\w*|curl)\b/i;
+  // Note: 'us\w*' (use/using) is deliberately excluded — it falsely flags prose
+  // answers that lead with "Using …"; stronger verbs below still catch real stalls.
+  const action = /\b(fetch\w*|scrap\w*|extract\w*|comput\w*|calculat\w*|run\w*|execut\w*|get\w*|grab\w*|download\w*|pull\w*|quer\w*|retriev\w*|gather\w*|load\w*|request\w*|call\w*|writ\w*|check\w*|look\w*|find\w*|pars\w*|build\w*|curl)\b/i;
   if(!action.test(s)) return false;
   // …framed as an intention/in-progress action (future or gerund-led) rather than a result.
   const future = /\b(we'?ll|i'?ll|i will|we will|let'?s|let me|i'?m|we'?re|going to|gonna|i can|i'?d|here'?s|first|next|now|okay|sure|alright)\b/i;

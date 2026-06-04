@@ -161,7 +161,7 @@ func (wp *WarmPool) Close() {
 	wp.ready = nil
 	wp.mu.Unlock()
 	for _, n := range names {
-		_ = exec.Command("docker", "rm", "-f", n).Run()
+		dockerRmTimeout(n)
 	}
 }
 
@@ -231,7 +231,7 @@ func (wp *WarmPool) take() (string, bool) {
 // retire force-removes a used container and asynchronously boots a replacement to
 // keep the pool topped up. Removal is unconditional (single-use guarantee).
 func (wp *WarmPool) retire(name string) {
-	_ = exec.Command("docker", "rm", "-f", name).Run()
+	dockerRmTimeout(name)
 	wp.mu.Lock()
 	closed := wp.closed
 	wp.mu.Unlock()
@@ -249,12 +249,27 @@ func (wp *WarmPool) retire(name string) {
 		wp.mu.Lock()
 		if wp.closed {
 			wp.mu.Unlock()
-			_ = exec.Command("docker", "rm", "-f", repl).Run()
+			dockerRmTimeout(repl)
 			return
 		}
 		wp.ready = append(wp.ready, repl)
 		wp.mu.Unlock()
 	}()
+}
+
+// dockerRmTimeout / dockerKillTimeout run best-effort container teardown with a
+// hard deadline, so a wedged docker daemon can't block pool replenishment or
+// graceful shutdown indefinitely (bare exec.Command.Run() has no timeout).
+func dockerRmTimeout(name string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_ = exec.CommandContext(ctx, "docker", "rm", "-f", name).Run()
+}
+
+func dockerKillTimeout(name string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_ = exec.CommandContext(ctx, "docker", "kill", name).Run()
 }
 
 // boot starts one hardened, idle warm container running `sleep infinity`. It mirrors
@@ -394,7 +409,7 @@ func (wp *WarmPool) execInto(ctx context.Context, name string, s Spec, sink Outp
 	var timedOut atomic.Bool
 	timer := time.AfterFunc(wall, func() {
 		timedOut.Store(true)
-		_ = exec.Command("docker", "kill", name).Run()
+		dockerKillTimeout(name)
 	})
 
 	waitErr := cmd.Wait()

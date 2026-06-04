@@ -2,7 +2,10 @@
 # HTTP clients, HTML/XML scraping, data wrangling, parsing. All wheels are
 # arm64/amd64 manylinux so the build needs no compiler. Libs are baked in so they
 # work even with the sandbox network OFF (compute); turn network ON to fetch.
-FROM python:3-slim
+# Base pinned by digest (THREAT_MODEL control #13): a floating :3-slim tag could
+# silently swap in unvetted code under the trust base of every sandbox run.
+# Update the digest deliberately (re-resolve with `docker inspect`), not implicitly.
+FROM python:3-slim@sha256:c845af9399020c7e562969a13689e929074a10fd057acd1b1fad06a2fb068e97
 
 # Runtime libs some wheels dlopen (lxml/pillow) + a real shell toolbelt so the
 # interpreter can act like an OS: curl/wget for HTTP, jq for JSON, git, ripgrep,
