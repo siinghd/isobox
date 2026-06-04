@@ -22,6 +22,15 @@ type File struct {
 	Encoding string `json:"encoding,omitempty"` // utf8 (default) | base64 | hex
 }
 
+// Mount is an extra host bind mounted into the sandbox — the seam for stateful
+// sessions (a persistent /workspace) and memory volumes (/memory). HostPath is
+// always chosen by the control plane (never the caller), so it is trusted.
+type Mount struct {
+	HostPath string // absolute, control-plane-owned, pre-validated
+	Target   string // in-container path, e.g. "/workspace"
+	RW       bool   // false => read-only
+}
+
 // Limits are the per-execution resource bounds. They are enforced by the host
 // kernel (cgroup v2) and by the worker (wall-time, output size), never trusted
 // to the guest.
@@ -46,6 +55,7 @@ type Spec struct {
 	Env         map[string]string // extra env (HOME=/tmp is always added)
 	ScratchExec bool              // true => /tmp mounted exec (compiled langs)
 	ScratchMB   int               // size of the /tmp tmpfs in MiB (default 64)
+	Mounts      []Mount           // extra binds (session /workspace, memory volumes); nil for one-shot /execute
 	Files       []File            // source files written into the job dir
 	Stdin       string            // fed to the program's stdin
 	Argv        []string          // user program arguments (passed safely as "$@")

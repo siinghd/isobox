@@ -2,13 +2,31 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"sync"
 
 	"github.com/siinghd/isobox/internal/executor"
+	"github.com/siinghd/isobox/internal/registry"
 )
+
+var errNoSource = errors.New("no source")
+
+// buildSpec resolves the request's files (or `code`) and clamped limits into an
+// executor.Spec for the given language. Shared by /execute and session exec.
+func (s *Server) buildSpec(lang *registry.Language, req execRequest) (executor.Spec, error) {
+	files := req.Files
+	if len(files) == 0 && req.Code != "" {
+		files = []executor.File{{Name: lang.SourceFile, Content: req.Code}}
+	}
+	if len(files) == 0 {
+		return executor.Spec{}, errNoSource
+	}
+	limits := clampLimits(lang.DefaultLimits(), req.Limits)
+	return lang.BuildSpec(files, req.Stdin, req.Args, limits, req.Network), nil
+}
 
 type execRequest struct {
 	Language string            `json:"language"`
@@ -66,17 +84,11 @@ func (s *Server) handleExecute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	files := req.Files
-	if len(files) == 0 && req.Code != "" {
-		files = []executor.File{{Name: lang.SourceFile, Content: req.Code}}
-	}
-	if len(files) == 0 {
+	spec, err := s.buildSpec(lang, req)
+	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "no_source", "detail": "provide `code` or `files`"})
 		return
 	}
-
-	limits := clampLimits(lang.DefaultLimits(), req.Limits)
-	spec := lang.BuildSpec(files, req.Stdin, req.Args, limits, req.Network)
 
 	// Global concurrency gate. If saturated, shed load with 429 + Retry-After
 	// rather than piling sandboxes onto a shared host.

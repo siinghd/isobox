@@ -17,6 +17,10 @@ ExecStart=/home/deploy/isobox/bin/isoboxd
 Restart=on-failure
 RestartSec=2
 
+# /var/lib/isobox (sessions, volumes, KV) — created + owned by the service user.
+StateDirectory=isobox
+StateDirectoryMode=0700
+
 Environment=ISOBOX_ADDR=127.0.0.1:8090
 Environment=ISOBOX_REGISTRY=/home/deploy/isobox/internal/registry/registry.yaml
 Environment=ISOBOX_CONCURRENCY=4

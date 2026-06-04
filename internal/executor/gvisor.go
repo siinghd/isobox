@@ -286,6 +286,17 @@ func (g *Gvisor) buildRunArgs(name, jobDir string, s Spec) []string {
 		"--label", "isobox.managed=true",
 	)
 
+	// Extra binds: a session's persistent /workspace (RW) and any memory volume.
+	// These survive across steps; the rootfs stays --read-only and every other
+	// control (gVisor, cap-drop, no-new-privs, nobody, network) is unchanged.
+	for _, m := range s.Mounts {
+		mode := "ro"
+		if m.RW {
+			mode = "rw"
+		}
+		a = append(a, "-v", m.HostPath+":"+m.Target+":"+mode)
+	}
+
 	// HOME must be writable under --read-only + nobody; point it at the tmpfs.
 	env := map[string]string{"HOME": "/tmp"}
 	for k, v := range s.Env {

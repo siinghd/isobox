@@ -15,6 +15,7 @@ import (
 	"github.com/siinghd/isobox/internal/executor"
 	"github.com/siinghd/isobox/internal/registry"
 	"github.com/siinghd/isobox/internal/sched"
+	"github.com/siinghd/isobox/internal/session"
 	"github.com/siinghd/isobox/internal/web"
 )
 
@@ -34,8 +35,9 @@ type Server struct {
 	Reg         *registry.Registry
 	Exec        executor.Executor
 	Sema        *sched.Limiter
-	APIKey      string        // if non-empty, required via Bearer or X-API-Key
-	AcquireWait time.Duration // max wait for a concurrency slot before 429
+	Sessions    *session.Manager // stateful sessions (v2); nil disables /v1/sessions
+	APIKey      string           // if non-empty, required via Bearer or X-API-Key
+	AcquireWait time.Duration    // max wait for a concurrency slot before 429
 	ipLimiter   *ipLimiter
 }
 
@@ -79,6 +81,21 @@ func (s *Server) Router(cfg Config) http.Handler {
 		r.Use(s.authMiddleware)
 		r.Post("/execute", s.handleExecute)
 	})
+
+	// Stateful sessions (v2): rate limit + global auth; per-session capability
+	// token is checked inside each handler. File uploads get a larger body cap.
+	if s.Sessions != nil {
+		r.Group(func(r chi.Router) {
+			r.Use(s.ipLimiter.middleware)
+			r.Use(s.authMiddleware)
+			r.With(maxBody(maxBodyBytes)).Post("/v1/sessions", s.handleCreateSession)
+			r.With(maxBody(maxBodyBytes)).Post("/v1/sessions/{id}/exec", s.handleSessionExec)
+			r.Get("/v1/sessions/{id}/fs", s.handleSessionFSGet)
+			r.With(maxBody(maxSessionUpload)).Put("/v1/sessions/{id}/fs", s.handleSessionFSPut)
+			r.Delete("/v1/sessions/{id}/fs", s.handleSessionFSDelete)
+			r.Delete("/v1/sessions/{id}", s.handleDestroySession)
+		})
+	}
 
 	return r
 }
