@@ -37,6 +37,7 @@ type runResult struct {
 	OOMKilled  bool   `json:"oomKilled"`
 	Truncated  bool   `json:"truncated"`
 	DurationMs int64  `json:"durationMs"`
+	Network    bool   `json:"network"` // whether filtered egress was actually applied
 }
 
 type execResponse struct {
@@ -44,6 +45,7 @@ type execResponse struct {
 	Version  string    `json:"version"`
 	Backend  string    `json:"backend"`
 	Run      runResult `json:"run"`
+	Warning  string    `json:"warning,omitempty"`
 }
 
 func (s *Server) handleExecute(w http.ResponseWriter, r *http.Request) {
@@ -95,10 +97,14 @@ func (s *Server) handleExecute(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "execution_failed", "detail": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, execResponse{
+	resp := execResponse{
 		Language: lang.Name, Version: lang.Version, Backend: s.Exec.Name(),
 		Run: toRunResult(res),
-	})
+	}
+	if spec.Network && !res.Network {
+		resp.Warning = "network requested but currently unavailable (egress firewall not verified); ran with network OFF"
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // executeSSE streams stdout/stderr chunks as Server-Sent Events, then a final
@@ -122,17 +128,21 @@ func (s *Server) executeSSE(w http.ResponseWriter, r *http.Request, name, versio
 		sink.event("error", map[string]any{"error": err.Error()})
 		return
 	}
-	sink.event("done", map[string]any{
+	done := map[string]any{
 		"language": name, "version": version, "backend": s.Exec.Name(),
 		"run": toRunResult(res),
-	})
+	}
+	if spec.Network && !res.Network {
+		done["warning"] = "network requested but currently unavailable (egress firewall not verified); ran with network OFF"
+	}
+	sink.event("done", done)
 }
 
 func toRunResult(res executor.Result) runResult {
 	return runResult{
 		Stdout: res.Stdout, Stderr: res.Stderr, ExitCode: res.ExitCode,
 		TimedOut: res.TimedOut, OOMKilled: res.OOMKilled, Truncated: res.Truncated,
-		DurationMs: res.DurationMs,
+		DurationMs: res.DurationMs, Network: res.Network,
 	}
 }
 

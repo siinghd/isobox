@@ -1,0 +1,590 @@
+openapi: 3.1.0
+info:
+  title: isobox
+  version: 1.0.0
+  description: |
+    **isobox** is an open-source sandbox that runs untrusted / AI-generated code in
+    [gVisor](https://gvisor.dev/)-isolated, resource-capped, ephemeral containers.
+    It is security-first and built for AI agents.
+
+    Each request to `POST /execute` spins up a fresh, throwaway sandbox, runs the
+    supplied program under hard CPU / memory / PID / wall-time / output limits, and
+    tears the sandbox down. Networking is **off by default** and, when opted into,
+    is restricted to filtered public-internet egress that **fails closed**.
+
+    ## Authentication
+    Auth is **optional**. If the operator configures an API key, send it as either
+    `X-API-Key: <key>` or `Authorization: Bearer <key>`. When no key is configured,
+    all endpoints are open and the `401` response will not occur.
+
+    ## Streaming (SSE) variant of `/execute`
+    `POST /execute` also supports live streaming. See the operation description for
+    `POST /execute` for the event protocol — OpenAPI cannot faithfully model an
+    `text/event-stream` body, so it is documented in prose there.
+
+    ## Other endpoints (not modelled here)
+    - `GET /` — interactive playground UI (HTML).
+    - `GET /llms.txt` — this API documented for LLMs (`text/plain`).
+    - `GET /openapi.yaml` — this spec (`application/yaml`).
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+
+servers:
+  - url: https://isobox.hsingh.app
+    description: Public hosted instance.
+  - url: http://127.0.0.1:8090
+    description: Local self-hosted default.
+
+tags:
+  - name: health
+    description: Liveness and readiness probes.
+  - name: runtimes
+    description: Available language runtimes.
+  - name: execute
+    description: Run code in an isolated sandbox.
+
+security:
+  - {}
+  - apiKeyHeader: []
+  - bearerAuth: []
+
+paths:
+  /healthz:
+    get:
+      tags: [health]
+      operationId: getHealthz
+      summary: Liveness probe
+      description: Returns `200` with the plain-text body `ok` whenever the process is alive.
+      security:
+        - {}
+      responses:
+        '200':
+          description: The process is alive.
+          content:
+            text/plain:
+              schema:
+                type: string
+                examples:
+                  - ok
+
+  /readyz:
+    get:
+      tags: [health]
+      operationId: getReadyz
+      summary: Readiness probe
+      description: |
+        Reports whether the service is ready to accept executions. Ready is `true`
+        only when the protective cgroup slice is memory-capped **and** the gVisor
+        backend is healthy.
+      security:
+        - {}
+      responses:
+        '200':
+          description: The service is ready.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Ready'
+              examples:
+                ready:
+                  value:
+                    ready: true
+                    backend: gvisor
+        '503':
+          description: The service is not ready.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotReady'
+              examples:
+                notReady:
+                  value:
+                    ready: false
+                    reason: protective cgroup slice is not memory-capped
+
+  /runtimes:
+    get:
+      tags: [runtimes]
+      operationId: getRuntimes
+      summary: List available runtimes
+      description: Returns the list of language runtimes the server can execute, including aliases.
+      responses:
+        '200':
+          description: The available runtimes.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Runtime'
+              examples:
+                runtimes:
+                  value:
+                    - language: python
+                      version: 3.14-agent
+                      aliases: [py, py3, python3]
+                      compiled: false
+                      backend: gvisor
+                    - language: go
+                      version: '1.24'
+                      aliases: [golang]
+                      compiled: true
+                      backend: gvisor
+                    - language: rust
+                      version: '1.87'
+                      aliases: [rs]
+                      compiled: true
+                      backend: gvisor
+
+  /execute:
+    post:
+      tags: [execute]
+      operationId: postExecute
+      summary: Execute code in an isolated sandbox
+      description: |
+        Runs the supplied program in a fresh, ephemeral gVisor sandbox under hard
+        resource limits and returns the result.
+
+        Provide source via **`code`** (single-file convenience) **or** **`files`**
+        (multi-file). At least one is required. The request body is hard-capped at
+        **256 KiB**; all `limits` are silently **clamped** to the documented ceilings.
+
+        ### Synchronous mode (default)
+        With `Content-Type: application/json` and the default `Accept`, the response
+        is a single JSON [`ExecuteResponse`](#/components/schemas/ExecuteResponse).
+
+        ### Streaming mode (Server-Sent Events)
+        Send `Accept: text/event-stream` to stream output live. The response is a
+        `text/event-stream` body — OpenAPI cannot model SSE event frames, so the
+        protocol is described here. Events:
+
+        - `event: stdout` / `data: {"chunk":"he"}` — a chunk of standard output.
+        - `event: stderr` / `data: {"chunk":"oops\n"}` — a chunk of standard error.
+        - `event: done` / `data: {ExecuteResponse}` — terminal success event; the
+          `data` payload is the full `ExecuteResponse` object (same shape as the
+          synchronous `200` body, including `run.network` and an optional `warning`).
+        - `event: error` / `data: {"error":"..."}` — emitted only on internal failure.
+
+        Each event is a UTF-8 SSE frame terminated by a blank line (`\n\n`).
+
+        ### Networking
+        `network` is `false` by default. When `true`, the sandbox may reach the
+        **public internet only**: cloud metadata (`169.254.169.254`), all private /
+        RFC1918 ranges, the host (including VPN), outbound SMTP, IPv6, and other
+        sandboxes are firewalled off. It **fails closed** — if the egress firewall
+        cannot be verified, the run executes with networking OFF, `run.network`
+        is `false`, and a `warning` is included.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExecuteRequest'
+            examples:
+              simple:
+                summary: Single-file Python
+                value:
+                  language: python
+                  code: print(40 + 2)
+              multiFile:
+                summary: Multi-file with stdin, args and limits
+                value:
+                  language: python
+                  version: 3.14-agent
+                  files:
+                    - name: main.py
+                      content: |
+                        import sys
+                        print("hello", sys.argv[1])
+                        print("stdin was:", sys.stdin.read())
+                      encoding: utf8
+                  stdin: some input
+                  args: [world]
+                  limits:
+                    memoryBytes: 268435456
+                    cpus: 1.0
+                    pids: 128
+                    outputBytes: 65536
+                    wallTimeMs: 10000
+              network:
+                summary: Filtered egress (opt-in)
+                value:
+                  language: python
+                  network: true
+                  code: import requests; print(requests.get("https://api.github.com").status_code)
+      responses:
+        '200':
+          description: The program ran. Inspect `run.exitCode`, `run.timedOut` and `run.oomKilled` for the outcome.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExecuteResponse'
+              examples:
+                ok:
+                  summary: Successful run
+                  value:
+                    language: python
+                    version: 3.14-agent
+                    backend: gvisor
+                    run:
+                      stdout: '42\n'
+                      stderr: ''
+                      exitCode: 0
+                      timedOut: false
+                      oomKilled: false
+                      truncated: false
+                      durationMs: 214
+                      network: false
+                networkDenied:
+                  summary: Network requested but unavailable (fail-closed)
+                  value:
+                    language: python
+                    version: 3.14-agent
+                    backend: gvisor
+                    run:
+                      stdout: ''
+                      stderr: "ConnectionError\n"
+                      exitCode: 1
+                      timedOut: false
+                      oomKilled: false
+                      truncated: false
+                      durationMs: 188
+                      network: false
+                    warning: network requested but currently unavailable; ran with network disabled (fail-closed)
+        '400':
+          description: |
+            The request was rejected. The `error` discriminator identifies the cause:
+            `invalid_json` (malformed body or body too large), `language_required`,
+            `unknown_language`, or `no_source`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                invalidJson:
+                  value:
+                    error: invalid_json
+                    detail: 'unexpected end of JSON input'
+                languageRequired:
+                  value:
+                    error: language_required
+                unknownLanguage:
+                  value:
+                    error: unknown_language
+                    detail: '"x" is not a known runtime; see GET /runtimes'
+                noSource:
+                  value:
+                    error: no_source
+                    detail: 'provide `code` or `files`'
+        '401':
+          description: An API key is configured on the server but was missing or invalid.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                unauthorized:
+                  value:
+                    error: unauthorized
+        '429':
+          description: |
+            Rate or capacity limit hit. `error: rate_limited` is the per-IP token
+            bucket (default 30/min, burst 10); `error: capacity` is the global
+            concurrency cap (default 4 slots). The `Retry-After` header gives the
+            number of seconds to wait before retrying.
+          headers:
+            Retry-After:
+              description: Seconds to wait before retrying.
+              required: true
+              schema:
+                type: integer
+                minimum: 0
+                examples:
+                  - 2
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                rateLimited:
+                  value:
+                    error: rate_limited
+                capacity:
+                  value:
+                    error: capacity
+                    detail: no free execution slot
+
+components:
+  securitySchemes:
+    apiKeyHeader:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: Optional. The configured API key. Only enforced when the operator sets a key.
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: 'Optional. The configured API key sent as `Authorization: Bearer <key>`. Only enforced when the operator sets a key.'
+
+  schemas:
+    ExecuteRequest:
+      type: object
+      description: A request to run code in an isolated sandbox. At least one of `code` or `files` is required.
+      required: [language]
+      additionalProperties: false
+      properties:
+        language:
+          type: string
+          description: Runtime name or alias (see `GET /runtimes`).
+          examples: [python]
+        version:
+          type: string
+          description: Optional. Pins a specific runtime version.
+          examples: [3.14-agent]
+        code:
+          type: string
+          description: Single-file convenience. Provide `code` or `files`.
+          examples: ['print(1)']
+        files:
+          type: array
+          description: Multi-file source. Provide `code` or `files`.
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/File'
+        stdin:
+          type: string
+          description: Optional. Data fed to the program's standard input.
+          default: ''
+        args:
+          type: array
+          description: Optional. Program argv, passed safely as positional parameters.
+          default: []
+          items:
+            type: string
+        limits:
+          $ref: '#/components/schemas/Limits'
+        network:
+          type: boolean
+          description: Opt into filtered public-internet egress. Fails closed if egress cannot be verified.
+          default: false
+      examples:
+        - language: python
+          code: print(40 + 2)
+
+    File:
+      type: object
+      description: A single source file.
+      required: [name, content]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          description: File name (relative path within the sandbox working directory).
+          examples: [main.py]
+        content:
+          type: string
+          description: File contents, decoded according to `encoding`.
+          examples: ["print('hi')"]
+        encoding:
+          type: string
+          description: How `content` is encoded.
+          enum: [utf8, base64, hex]
+          default: utf8
+      examples:
+        - name: main.py
+          content: "print('hi')"
+          encoding: utf8
+
+    Limits:
+      type: object
+      description: |
+        Optional resource limits. Every field is independently **clamped** to the
+        documented `[minimum, maximum]` range before the sandbox is created.
+      additionalProperties: false
+      properties:
+        memoryBytes:
+          type: integer
+          format: int64
+          description: Memory ceiling in bytes (8 MiB .. 512 MiB).
+          minimum: 8388608
+          maximum: 536870912
+          default: 268435456
+          examples: [268435456]
+        cpus:
+          type: number
+          description: Fractional CPU allotment (0.1 .. 2.0).
+          minimum: 0.1
+          maximum: 2.0
+          default: 1.0
+          examples: [1.0]
+        pids:
+          type: integer
+          description: Maximum number of processes/threads (1 .. 256).
+          minimum: 1
+          maximum: 256
+          default: 128
+          examples: [128]
+        outputBytes:
+          type: integer
+          format: int64
+          description: Combined stdout+stderr cap in bytes (1 KiB .. 256 KiB). Output beyond this sets `run.truncated`.
+          minimum: 1024
+          maximum: 262144
+          default: 65536
+          examples: [65536]
+        wallTimeMs:
+          type: integer
+          format: int64
+          description: Wall-clock execution timeout in milliseconds (100 .. 20000). Exceeding it sets `run.timedOut`.
+          minimum: 100
+          maximum: 20000
+          default: 10000
+          examples: [10000]
+
+    Runtime:
+      type: object
+      description: A language runtime the server can execute.
+      required: [language, version, aliases, compiled, backend]
+      properties:
+        language:
+          type: string
+          description: Canonical runtime name.
+          examples: [python]
+        version:
+          type: string
+          description: Runtime version string.
+          examples: [3.14-agent]
+        aliases:
+          type: array
+          description: Accepted alternative names for this runtime.
+          items:
+            type: string
+          examples:
+            - [py, py3, python3]
+        compiled:
+          type: boolean
+          description: Whether the runtime compiles before running (e.g. Go, Rust).
+          examples: [false]
+        backend:
+          type: string
+          description: Isolation backend.
+          examples: [gvisor]
+
+    RunResult:
+      type: object
+      description: The outcome of a single sandboxed execution.
+      required:
+        - stdout
+        - stderr
+        - exitCode
+        - timedOut
+        - oomKilled
+        - truncated
+        - durationMs
+        - network
+      properties:
+        stdout:
+          type: string
+          description: Captured standard output.
+        stderr:
+          type: string
+          description: Captured standard error.
+        exitCode:
+          type: integer
+          description: Process exit code. `137` indicates a kill (see `timedOut` / `oomKilled`).
+          examples: [0]
+        timedOut:
+          type: boolean
+          description: True if the run was killed for exceeding `limits.wallTimeMs` (exit code 137).
+          examples: [false]
+        oomKilled:
+          type: boolean
+          description: True if the run was killed for exceeding the memory cap (exit code 137). Disambiguates timeout vs OOM.
+          examples: [false]
+        truncated:
+          type: boolean
+          description: True if output was truncated at `limits.outputBytes`.
+          examples: [false]
+        durationMs:
+          type: integer
+          format: int64
+          description: Wall-clock execution time in milliseconds.
+          minimum: 0
+          examples: [214]
+        network:
+          type: boolean
+          description: Whether filtered egress was ACTUALLY applied to this run.
+          examples: [false]
+
+    ExecuteResponse:
+      type: object
+      description: The result of `POST /execute` in synchronous mode (also the `done` SSE event payload).
+      required: [language, version, backend, run]
+      properties:
+        language:
+          type: string
+          description: Resolved canonical runtime name.
+          examples: [python]
+        version:
+          type: string
+          description: Resolved runtime version.
+          examples: [3.14-agent]
+        backend:
+          type: string
+          description: Isolation backend used.
+          examples: [gvisor]
+        run:
+          $ref: '#/components/schemas/RunResult'
+        warning:
+          type: string
+          description: Present only when `network` was requested but denied (fail-closed).
+          examples:
+            - network requested but currently unavailable; ran with network disabled (fail-closed)
+
+    Ready:
+      type: object
+      description: Readiness response when the service is ready.
+      required: [ready, backend]
+      properties:
+        ready:
+          type: boolean
+          const: true
+        backend:
+          type: string
+          examples: [gvisor]
+
+    NotReady:
+      type: object
+      description: Readiness response when the service is not ready.
+      required: [ready, reason]
+      properties:
+        ready:
+          type: boolean
+          const: false
+        reason:
+          type: string
+          description: Human-readable reason the service is not ready.
+          examples: [protective cgroup slice is not memory-capped]
+
+    Error:
+      type: object
+      description: Error envelope returned for all non-2xx responses.
+      required: [error]
+      properties:
+        error:
+          type: string
+          description: Machine-readable error code.
+          enum:
+            - invalid_json
+            - language_required
+            - unknown_language
+            - no_source
+            - unauthorized
+            - rate_limited
+            - capacity
+          examples: [unknown_language]
+        detail:
+          type: string
+          description: Optional human-readable detail.
+          examples: ['"x" is not a known runtime; see GET /runtimes']

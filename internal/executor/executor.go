@@ -64,6 +64,7 @@ type Result struct {
 	Truncated     bool   `json:"truncated"`
 	DurationMs    int64  `json:"durationMs"`
 	CompileOutput string `json:"compileOutput,omitempty"`
+	Network       bool   `json:"network"` // whether filtered egress was actually applied
 }
 
 // OutputSink receives stdout/stderr chunks as they are produced. It is optional:

@@ -45,10 +45,11 @@ add INPUT -i "$BRIDGE" -j DROP
 
 echo "==> verify + heartbeat sentinel (fail-closed gate for isoboxd)"
 # isoboxd is unprivileged and cannot read iptables, so it trusts this sentinel:
-# it is (re)touched ONLY when every load-bearing rule is confirmed present. A
-# systemd timer re-runs this script every 60s, so if the firewall is ever torn
-# down (e.g. a docker restart flushes DOCKER-USER), the sentinel goes stale and
-# isoboxd disables network mode instead of failing open.
+# it is (re)touched ONLY when every load-bearing rule is confirmed present. The
+# supervised isobox-egress.service re-runs this every 30s, so if the firewall is
+# ever torn down (e.g. a docker restart flushes DOCKER-USER), it is restored
+# within 30s; until then the sentinel goes stale and isoboxd disables network
+# mode instead of failing open.
 SENTINEL="${ISOBOX_EGRESS_SENTINEL:-/etc/isobox/egress-ok}"
 ok=1
 for d in 169.254.0.0/16 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16; do

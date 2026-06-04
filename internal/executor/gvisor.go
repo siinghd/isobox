@@ -59,7 +59,7 @@ func NewGvisor() *Gvisor {
 		EgressNetwork:  "isobox-egress",
 		ResolvConf:     "/etc/isobox/resolv.conf",
 		Sentinel:       "/etc/isobox/egress-ok",
-		SentinelMaxAge: 180 * time.Second,
+		SentinelMaxAge: 240 * time.Second, // ~5 missed 45s heartbeats before fail-closed
 	}
 }
 
@@ -101,6 +101,7 @@ func (g *Gvisor) HealthCheck(ctx context.Context) error {
 // Execute runs one Spec to completion and always reaps the sandbox.
 func (g *Gvisor) Execute(ctx context.Context, s Spec, sink OutputSink) (Result, error) {
 	var res Result
+	res.Network = g.networkEnabled(s) // false if requested but fail-closed
 
 	// 1. Ephemeral, world-readable job dir so uid 65534 (nobody) inside the
 	//    sandbox can read the source files (they are the caller's own code).

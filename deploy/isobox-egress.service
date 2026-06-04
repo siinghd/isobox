@@ -1,14 +1,20 @@
-# Installs the isobox filtered-egress network + firewall on boot (idempotent).
-# Required for opt-in network:true sandboxes; harmless if you never enable them.
+# Continuously asserts the isobox egress firewall + refreshes the fail-closed
+# heartbeat sentinel every 30s. A SUPERVISED LOOP (Type=simple, Restart=always)
+# rather than a timer: it cannot silently stop refreshing the way a oneshot+timer
+# can. If the rules are ever flushed (e.g. a docker restart), they are restored
+# within 30s; until then isoboxd refuses network mode (sentinel goes stale).
 [Unit]
-Description=isobox filtered egress network + firewall
+Description=isobox egress firewall (supervised, self-healing) + heartbeat
 After=docker.service
 Requires=docker.service
 Before=isoboxd.service
 
 [Service]
-Type=oneshot
-ExecStart=/usr/bin/env bash /home/deploy/isobox/deploy/egress-setup.sh
+Type=simple
+# Re-assert quietly every 30s; log only failures to the journal.
+ExecStart=/bin/bash -c 'while true; do /usr/bin/env bash /home/deploy/isobox/deploy/egress-setup.sh >/dev/null 2>&1 || echo "isobox-egress: re-assert FAILED (network mode will fail closed)"; sleep 30; done'
+Restart=always
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target

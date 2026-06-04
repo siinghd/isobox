@@ -1,0 +1,170 @@
+# isobox
+
+> isobox is an open-source HTTP sandbox that runs untrusted / AI-generated code in gVisor-isolated, resource-capped, ephemeral containers. It is security-first and built for AI agents: POST code to `/execute` and get back stdout/stderr/exitCode, optionally streamed over SSE. Base URL (live): `https://isobox.hsingh.app` — self-host default: `http://127.0.0.1:8090`.
+
+## Endpoints
+
+- `GET /` — playground UI (HTML).
+- `GET /healthz` — liveness. `200 text/plain` body `ok`.
+- `GET /readyz` — readiness. `200 {"ready":true,"backend":"gvisor"}` or `503 {"ready":false,"reason":"..."}`. Ready only if the protective cgroup slice is memory-capped AND the backend is healthy.
+- `GET /runtimes` — list runtimes. `200 [{"language","version","aliases":[...],"compiled":bool,"backend":"gvisor"}]`.
+- `POST /execute` — run code. Synchronous JSON, or live SSE if `Accept: text/event-stream`.
+- `GET /llms.txt` — this document. `text/plain`.
+- `GET /openapi.yaml` — OpenAPI spec. `application/yaml`.
+
+## Auth
+
+Optional. If the server has an API key configured, send it as `X-API-Key: <key>` OR `Authorization: Bearer <key>`. If no key is configured (e.g. the public demo), the endpoint is open and only rate limiting applies. A bad/missing key when one is configured returns `401 {"error":"unauthorized"}`.
+
+## POST /execute — Request
+
+`Content-Type: application/json`. Request body hard cap: 256 KiB.
+
+```json
+{
+  "language": "python",
+  "version": "3.14-agent",
+  "code": "print(1)",
+  "files": [{"name": "main.py", "content": "...", "encoding": "utf8"}],
+  "stdin": "",
+  "args": [],
+  "limits": {
+    "memoryBytes": 268435456,
+    "cpus": 1.0,
+    "pids": 128,
+    "outputBytes": 65536,
+    "wallTimeMs": 10000
+  },
+  "network": false
+}
+```
+
+Fields:
+
+- `language` (string, REQUIRED) — name or alias; see Languages / `GET /runtimes`.
+- `version` (string, optional) — pins a specific version; otherwise the default for that language.
+- `code` (string) — single-file convenience source. Provide `code` OR `files`. At least one is REQUIRED.
+- `files` (array, optional) — explicit multi-file source. Each item: `name` (string), `content` (string), `encoding` (one of `utf8` (default) | `base64` | `hex`).
+- `stdin` (string, optional) — fed to the program's stdin.
+- `args` (array of strings, optional) — program argv; passed safely as positional parameters.
+- `limits` (object, optional) — all sub-fields optional and individually CLAMPED to hard ceilings:
+  - `memoryBytes` (int) — default 268435456 (256 MiB). Min 8388608 (8 MiB), max 536870912 (512 MiB).
+  - `cpus` (float) — default 1.0. Min 0.1, max 2.0.
+  - `pids` (int) — default 128. Min 1, max 256.
+  - `outputBytes` (int) — combined stdout+stderr cap. Default 65536 (64 KiB). Min 1024 (1 KiB), max 262144 (256 KiB).
+  - `wallTimeMs` (int) — default 10000. Min 100, max 20000.
+- `network` (bool, optional) — default `false`. `true` opts into FILTERED egress (public internet only). See Network mode.
+
+Values outside a limit's range are clamped to the nearest bound, not rejected.
+
+## POST /execute — Response (200, application/json)
+
+```json
+{
+  "language": "python",
+  "version": "3.14-agent",
+  "backend": "gvisor",
+  "run": {
+    "stdout": "...",
+    "stderr": "...",
+    "exitCode": 0,
+    "timedOut": false,
+    "oomKilled": false,
+    "truncated": false,
+    "durationMs": 214,
+    "network": false
+  },
+  "warning": "network requested but currently unavailable (egress firewall not verified); ran with network OFF"
+}
+```
+
+Fields:
+
+- `language`, `version`, `backend` (string) — resolved language, resolved version, execution backend (`gvisor`).
+- `run.stdout`, `run.stderr` (string) — captured output (capped at `outputBytes`).
+- `run.exitCode` (int) — process exit code. A wall-time or memory kill yields `137`.
+- `run.timedOut` (bool) — `true` if killed by the wall-time cap.
+- `run.oomKilled` (bool) — `true` if killed by the memory cap. Disambiguates timeout vs OOM (both surface exitCode 137).
+- `run.truncated` (bool) — `true` if output hit the `outputBytes` cap.
+- `run.durationMs` (int) — wall-clock execution time in milliseconds.
+- `run.network` (bool) — whether filtered egress was ACTUALLY applied. May be `false` even when `network:true` was requested (fail-closed).
+- `warning` (string, optional) — present ONLY when `network:true` was requested but egress was denied. Exact text: `network requested but currently unavailable (egress firewall not verified); ran with network OFF`.
+
+## Streaming (SSE)
+
+Send header `Accept: text/event-stream` (alternatively `?stream=1`). The response is a stream of Server-Sent Events. Event names and payloads:
+
+```
+event: stdout
+data: {"chunk":"he"}
+
+event: stderr
+data: {"chunk":"oops\n"}
+
+event: done
+data: {"language":"python","version":"...","backend":"gvisor","run":{...},"warning":"..."}
+
+event: error
+data: {"error":"..."}
+```
+
+- `stdout` / `stderr` — incremental output chunks; `data` is `{"chunk": "<bytes>"}`.
+- `done` — final structured result; `data` is the same object as the non-streaming 200 response (`language`, `version`, `backend`, `run`, and `warning` when applicable).
+- `error` — emitted only on internal failure; `data` is `{"error": "<message>"}`.
+
+The HTTP status for an SSE response is always `200`; per-run outcomes (non-zero exit, timeout, OOM) are reported inside the `done` event's `run` object, not via HTTP status.
+
+## Errors (non-2xx, application/json)
+
+- `400 {"error":"invalid_json","detail":"..."}` — malformed body or body exceeds 256 KiB.
+- `400 {"error":"language_required"}` — `language` missing/empty.
+- `400 {"error":"unknown_language","detail":"\"x\" is not a known runtime; see GET /runtimes"}`.
+- `400 {"error":"no_source","detail":"provide `code` or `files`"}` — neither `code` nor `files` supplied.
+- `401 {"error":"unauthorized"}` — only when an API key is configured and the request key is wrong/missing.
+- `429 {"error":"rate_limited"}` — per-IP token bucket (default 30/min, burst 10). Includes a `Retry-After` header.
+- `429 {"error":"capacity","detail":"no free execution slot"}` — global concurrency cap reached (default 4). Includes a `Retry-After` header.
+
+## Languages
+
+Use `GET /runtimes` for the live list. Current runtimes (language, default version, aliases):
+
+- `python` — `3.14-agent` — aliases `py`, `py3`, `python3`. Batteries-included: `requests`, `httpx`, `beautifulsoup4`, `lxml`, `pandas`, `numpy`.
+- `python-slim` — `3.14.5` — alias `pyslim`.
+- `javascript` — `node-26` — aliases `js`, `node`, `nodejs`.
+- `typescript` — `node-26` — alias `ts`.
+- `ruby` — `3-alpine` — alias `rb`.
+- `go` — `1.24-warm` — alias `golang`. Compiled, pre-warmed.
+- `rust` — `1-alpine` — alias `rs`. Compiled.
+
+Pass the language name or any alias in the request's `language` field.
+
+## Network mode
+
+`"network": false` by default. When `"network": true`, the code reaches the PUBLIC internet ONLY. Firewalled off: cloud metadata (`169.254.169.254`), all private / RFC1918 ranges, the host (including any VPN), outbound SMTP, IPv6, and other sandboxes.
+
+It fails CLOSED: if the egress firewall is not currently verified, the run executes with network OFF and the response reports `run.network: false` plus the `warning` field. Always check `run.network` to confirm egress was actually applied before assuming a fetch could have succeeded.
+
+## Examples
+
+```bash
+# simple — synchronous JSON
+curl -s https://isobox.hsingh.app/execute \
+  -H 'content-type: application/json' \
+  -d '{"language":"python","code":"print(40+2)"}'
+
+# streaming — live SSE output
+curl -N https://isobox.hsingh.app/execute \
+  -H 'accept: text/event-stream' \
+  -H 'content-type: application/json' \
+  -d '{"language":"python","code":"import time\nfor i in range(3):\n print(i,flush=True);time.sleep(.3)"}'
+
+# network fetch / scrape — filtered egress (check run.network in the response)
+curl -s https://isobox.hsingh.app/execute \
+  -H 'content-type: application/json' \
+  -d '{"language":"python","network":true,"code":"import requests;print(requests.get(\"https://api.github.com\").status_code)"}'
+
+# limits override — clamped to hard ceilings
+curl -s https://isobox.hsingh.app/execute \
+  -H 'content-type: application/json' \
+  -d '{"language":"python","code":"print(\"hi\")","limits":{"memoryBytes":134217728,"cpus":0.5,"pids":64,"outputBytes":131072,"wallTimeMs":5000}}'
+```
