@@ -144,3 +144,27 @@ curl -s https://isobox.hsingh.app/execute -H 'content-type: application/json' -d
 ## Client libraries
 
 Dependency-free: [`clients/python/isobox.py`](../clients/python/isobox.py) and [`clients/js/isobox.mjs`](../clients/js/isobox.mjs) — `execute()`, `stream()` (SSE), `runtimes()`.
+
+## Stateful sessions (`/v1`)
+
+For multi-step / agent workflows that share state. A **filesystem session** is a persistent `/workspace` shared across steps; each step still runs in a fresh hardened sandbox, so a session at rest costs **no RAM**. Every `/v1/sessions/{id}/*` call requires the capability token from create, as `X-Session-Token: <token>`.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/v1/sessions` | Create. Body `{"runtime","ttlSec"}` → `201 {id, token, runtime, type, createdAt}` |
+| `POST` | `/v1/sessions/{id}/exec` | Run a step (body = `/execute` body minus `language`); `/workspace` is RW + the cwd. Sync or SSE. |
+| `GET` | `/v1/sessions/{id}/fs?path=` | Dir → JSON listing; file → raw bytes |
+| `PUT` | `/v1/sessions/{id}/fs?path=` | Upload a file (raw body, ≤16 MiB) → `{path, bytes}` |
+| `DELETE` | `/v1/sessions/{id}/fs?path=` | Delete a file/subtree → `204` |
+| `DELETE` | `/v1/sessions/{id}` | End session + delete workspace → `204` |
+
+Errors: `401 invalid_session_token`, `404 session_not_found`, `413 quota_exceeded`, `400 invalid_path`; at create, `429 too_many_sessions` / `507 storage_full`. Per-session disk quota (default 512 MiB) is enforced against **actual** usage by a sweep (so direct writes to `/workspace` can't bypass it); a global disk ceiling + max-session count bound aggregate blast radius; idle sessions are reaped after their TTL (default 24h).
+
+```bash
+S=$(curl -s -X POST https://isobox.hsingh.app/v1/sessions -d '{"runtime":"python"}')
+ID=$(echo "$S"|jq -r .id); TOK=$(echo "$S"|jq -r .token)
+curl -s -X POST https://isobox.hsingh.app/v1/sessions/$ID/exec -H "X-Session-Token: $TOK" \
+  -d '{"code":"open(\"/workspace/x\",\"w\").write(\"42\")"}'
+curl -s -X POST https://isobox.hsingh.app/v1/sessions/$ID/exec -H "X-Session-Token: $TOK" \
+  -d '{"code":"print(open(\"/workspace/x\").read())"}'   # -> 42  (state shared across steps)
+```

@@ -168,3 +168,50 @@ curl -s https://isobox.hsingh.app/execute \
   -H 'content-type: application/json' \
   -d '{"language":"python","code":"print(\"hi\")","limits":{"memoryBytes":134217728,"cpus":0.5,"pids":64,"outputBytes":131072,"wallTimeMs":5000}}'
 ```
+
+## Stateful sessions (v1)
+
+For multi-step / agent workflows that need to share state. A *filesystem session*
+is a persistent `/workspace` directory shared across steps; each step still runs
+in a fresh hardened sandbox (so a session at rest costs no RAM). Files written to
+`/workspace` (or the session's working directory) in one step are visible to the
+next step and to the file API.
+
+Every `/v1/sessions/{id}/*` call requires the capability token returned at create,
+as header `X-Session-Token: <token>`.
+
+- `POST /v1/sessions` — create. Body `{"runtime":"python","ttlSec":86400}` (runtime
+  required; ttlSec optional). Returns `201 {"id","token","runtime","type","createdAt"}`.
+  Save the `token` — it is shown only once and is required on every later call.
+- `POST /v1/sessions/{id}/exec` — run one step. Body is the same as `/execute`
+  MINUS `language` (the session's runtime is used). The step runs with `/workspace`
+  mounted read-write and as its working directory. Sync JSON, or SSE with
+  `Accept: text/event-stream` (same event shape as `/execute`). `network` opt-in works.
+- `GET /v1/sessions/{id}/fs?path=<rel>` — if `path` is a dir, returns
+  `{"path","dir":true,"entries":[{"name","size","dir","modTime"}]}`; if a file,
+  returns the raw bytes (`application/octet-stream`).
+- `PUT /v1/sessions/{id}/fs?path=<rel>` — upload a file (raw body, up to 16 MiB).
+  Returns `{"path","bytes"}`. Counts against the per-session disk quota.
+- `DELETE /v1/sessions/{id}/fs?path=<rel>` — delete a file/subtree. `204`.
+- `DELETE /v1/sessions/{id}` — end the session and delete its workspace. `204`.
+
+Limits & errors: per-session disk quota (default 512 MiB, enforced against actual
+usage); a session/global storage ceiling and max-session count may return
+`429 {"error":"too_many_sessions"}` or `507 {"error":"storage_full"}` at create.
+Idle sessions are reaped after their TTL (default 24h). `404 session_not_found`,
+`401 invalid_session_token`, `413 quota_exceeded`, `400 invalid_path` as applicable.
+Paths are confined to the workspace (traversal is collapsed inside it).
+
+```bash
+# create a session
+S=$(curl -s -X POST https://isobox.hsingh.app/v1/sessions -d '{"runtime":"python"}')
+ID=$(echo "$S" | jq -r .id); TOK=$(echo "$S" | jq -r .token)
+# step 1 writes state, step 2 (a separate sandbox) reads it
+curl -s -X POST https://isobox.hsingh.app/v1/sessions/$ID/exec -H "X-Session-Token: $TOK" \
+  -d '{"code":"open(\"/workspace/x.txt\",\"w\").write(\"42\")"}'
+curl -s -X POST https://isobox.hsingh.app/v1/sessions/$ID/exec -H "X-Session-Token: $TOK" \
+  -d '{"code":"print(open(\"/workspace/x.txt\").read())"}'   # -> 42
+# download a file the code produced, then end the session
+curl -s "https://isobox.hsingh.app/v1/sessions/$ID/fs?path=x.txt" -H "X-Session-Token: $TOK"
+curl -s -X DELETE https://isobox.hsingh.app/v1/sessions/$ID -H "X-Session-Token: $TOK"
+```

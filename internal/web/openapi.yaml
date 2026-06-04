@@ -315,6 +315,107 @@ paths:
                     error: capacity
                     detail: no free execution slot
 
+  /v1/sessions:
+    post:
+      summary: Create a stateful session
+      description: >
+        Creates a filesystem session with a persistent /workspace shared across
+        steps. Returns a capability token required (as X-Session-Token) on every
+        subsequent /v1/sessions/{id}/* call.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [runtime]
+              properties:
+                runtime: { type: string, description: language name or alias }
+                ttlSec: { type: integer, description: idle TTL seconds (default 86400) }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string }
+                  token: { type: string, description: capability token; shown once }
+                  runtime: { type: string }
+                  type: { type: string, example: filesystem }
+                  createdAt: { type: string, format: date-time }
+        '429': { description: too many sessions }
+        '507': { description: session storage ceiling reached }
+  /v1/sessions/{id}/exec:
+    post:
+      summary: Run one step in a session
+      description: >
+        Body is the same as POST /execute MINUS `language` (the session runtime is
+        used). Runs in a fresh hardened sandbox with the session /workspace mounted
+        read-write as the working directory, so files persist across steps. Sync
+        JSON, or SSE with Accept: text/event-stream.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - name: X-Session-Token
+          in: header
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                code: { type: string }
+                files: { type: array, items: { $ref: '#/components/schemas/File' } }
+                stdin: { type: string }
+                args: { type: array, items: { type: string } }
+                limits: { $ref: '#/components/schemas/Limits' }
+                network: { type: boolean }
+      responses:
+        '200':
+          description: Result (same shape as /execute)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ExecuteResponse' }
+        '401': { description: invalid session token }
+        '404': { description: session not found }
+  /v1/sessions/{id}/fs:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+      - { name: path, in: query, required: false, schema: { type: string } }
+      - { name: X-Session-Token, in: header, required: true, schema: { type: string } }
+    get:
+      summary: Download a file, or list a directory
+      responses:
+        '200': { description: Raw file bytes, or a JSON directory listing }
+        '404': { description: not found }
+    put:
+      summary: Upload a file into the workspace (raw body, up to 16 MiB)
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        '200': { description: '{ path, bytes }' }
+        '413': { description: quota exceeded or body too large }
+    delete:
+      summary: Delete a file or subtree
+      responses:
+        '204': { description: Deleted }
+  /v1/sessions/{id}:
+    delete:
+      summary: End a session and delete its workspace
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: X-Session-Token, in: header, required: true, schema: { type: string } }
+      responses:
+        '204': { description: Destroyed }
+        '401': { description: invalid session token }
+
 components:
   securitySchemes:
     apiKeyHeader:

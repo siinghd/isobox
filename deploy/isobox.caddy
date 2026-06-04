@@ -4,9 +4,11 @@ isobox.hsingh.app {
 	import origin_tls
 	encode gzip zstd
 
-	# Match the control plane's 256 KiB request-body ceiling at the edge.
+	# Allow up to 16 MiB so session file uploads (PUT /v1/sessions/{id}/fs) work;
+	# the control plane still enforces the real per-endpoint caps (256 KiB for
+	# /execute and session exec, 16 MiB for file uploads).
 	request_body {
-		max_size 256KB
+		max_size 16MB
 	}
 
 	reverse_proxy 127.0.0.1:8090 {
