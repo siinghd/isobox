@@ -9,14 +9,30 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/siinghd/isobox/internal/auth"
+	"github.com/siinghd/isobox/internal/executor"
 	"github.com/siinghd/isobox/internal/session"
 )
 
 const maxSessionUpload = 16 << 20 // 16 MiB per file upload (workspace quota bounds the total)
 
 type createSessionRequest struct {
-	Runtime string `json:"runtime"`
-	TTLSec  int    `json:"ttlSec"`
+	Runtime  string `json:"runtime"`
+	TTLSec   int    `json:"ttlSec"`
+	VolumeID string `json:"volumeId"` // OPTIONAL: a memory volume to attach RW at /memory.
+}
+
+// reqTenant pulls the server-derived tenant from the context authMiddleware set.
+// If it is absent the request bypassed authMiddleware — a routing bug — and we
+// MUST fail closed (500) rather than silently default to "public". ok==false
+// means the handler should 500 and stop.
+func reqTenant(w http.ResponseWriter, r *http.Request) (string, bool) {
+	tenant, ok := auth.TenantFrom(r.Context())
+	if !ok {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "no_tenant", "detail": "request reached handler without a resolved tenant"})
+		return "", false
+	}
+	return tenant, true
 }
 
 type createSessionResponse struct {
@@ -40,7 +56,20 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "runtime_required", "detail": "see GET /runtimes"})
 		return
 	}
-	sess, err := s.Sessions.Create(req.Runtime, session.CreateOpts{TTL: time.Duration(req.TTLSec) * time.Second})
+	tenant, ok := reqTenant(w, r)
+	if !ok {
+		return
+	}
+
+	// Mint the session FIRST so we have its id to use as the RW lock holder, then
+	// attach the requested volume. volumeId from the body is ONLY ever the `id`
+	// arg to Attach(tenant, ...) — it never derives or overrides the tenant, so a
+	// volume of another tenant fails the key(tenant,id) lookup with ErrVolNotFound
+	// (404), not a cross-tenant attach. On attach failure we roll the session back.
+	sess, err := s.Sessions.Create(req.Runtime, session.CreateOpts{
+		TTL:    time.Duration(req.TTLSec) * time.Second,
+		Tenant: tenant,
+	})
 	if err != nil {
 		switch {
 		case errors.Is(err, session.ErrTooMany):
@@ -53,6 +82,32 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+
+	if req.VolumeID != "" {
+		if s.Volumes == nil {
+			_ = s.Sessions.Destroy(sess.ID, sess.Token, tenant)
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "volumes_disabled"})
+			return
+		}
+		hostPath, _, aerr := s.Volumes.Attach(tenant, req.VolumeID, sess.ID, true)
+		if aerr != nil {
+			_ = s.Sessions.Destroy(sess.ID, sess.Token, tenant) // roll back the just-created session
+			writeVolErr(w, aerr)
+			return
+		}
+		// Register the /memory mount so EVERY exec step replays it. If this fails
+		// (e.g. the session vanished between Create and now), release the RW hold
+		// and roll back so we never leak a lock on a session we don't return.
+		if err := s.Sessions.SetMounts(sess.ID, sess.Token, tenant, []executor.Mount{
+			{HostPath: hostPath, Target: "/memory", RW: true},
+		}); err != nil {
+			s.Volumes.Release(tenant, req.VolumeID, sess.ID)
+			_ = s.Sessions.Destroy(sess.ID, sess.Token, tenant)
+			writeSessErr(w, err)
+			return
+		}
+	}
+
 	writeJSON(w, http.StatusCreated, createSessionResponse{
 		ID: sess.ID, Token: sess.Token, Runtime: sess.Runtime, Type: sess.Type, CreatedAt: sess.CreatedAt,
 	})
@@ -61,7 +116,11 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 // POST /v1/sessions/{id}/exec — run one step sharing the session /workspace.
 func (s *Server) handleSessionExec(w http.ResponseWriter, r *http.Request) {
 	id, token := chi.URLParam(r, "id"), sessionToken(r)
-	runtime, err := s.Sessions.Runtime(id, token) // token-checked
+	tenant, ok := reqTenant(w, r)
+	if !ok {
+		return
+	}
+	runtime, err := s.Sessions.Runtime(id, token, tenant) // token + tenant checked
 	if err != nil {
 		writeSessErr(w, err)
 		return
@@ -93,7 +152,7 @@ func (s *Server) handleSessionExec(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Accel-Buffering", "no")
 		w.WriteHeader(http.StatusOK)
 		sink := &sseSink{w: w, flusher: flusher}
-		res, err := s.Sessions.Exec(r.Context(), id, token, spec, sink)
+		res, err := s.Sessions.Exec(r.Context(), id, token, tenant, spec, sink)
 		if err != nil {
 			sink.event("error", map[string]any{"error": err.Error()})
 			return
@@ -106,7 +165,7 @@ func (s *Server) handleSessionExec(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	res, err := s.Sessions.Exec(r.Context(), id, token, spec, nil)
+	res, err := s.Sessions.Exec(r.Context(), id, token, tenant, spec, nil)
 	if err != nil {
 		writeSessErr(w, err)
 		return
@@ -121,14 +180,18 @@ func (s *Server) handleSessionExec(w http.ResponseWriter, r *http.Request) {
 // GET /v1/sessions/{id}/fs?path=...  — dir => JSON listing, file => raw bytes.
 func (s *Server) handleSessionFSGet(w http.ResponseWriter, r *http.Request) {
 	id, token := chi.URLParam(r, "id"), sessionToken(r)
+	tenant, ok := reqTenant(w, r)
+	if !ok {
+		return
+	}
 	path := r.URL.Query().Get("path")
-	fi, err := s.Sessions.Stat(id, token, path)
+	fi, err := s.Sessions.Stat(id, token, tenant, path)
 	if err != nil {
 		writeSessErr(w, err)
 		return
 	}
 	if fi.Dir {
-		entries, err := s.Sessions.ListDir(id, token, path)
+		entries, err := s.Sessions.ListDir(id, token, tenant, path)
 		if err != nil {
 			writeSessErr(w, err)
 			return
@@ -136,7 +199,7 @@ func (s *Server) handleSessionFSGet(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"path": path, "dir": true, "entries": entries})
 		return
 	}
-	data, err := s.Sessions.ReadFile(id, token, path)
+	data, err := s.Sessions.ReadFile(id, token, tenant, path)
 	if err != nil {
 		writeSessErr(w, err)
 		return
@@ -148,6 +211,10 @@ func (s *Server) handleSessionFSGet(w http.ResponseWriter, r *http.Request) {
 // PUT /v1/sessions/{id}/fs?path=...  — upload a file (raw body), quota-checked.
 func (s *Server) handleSessionFSPut(w http.ResponseWriter, r *http.Request) {
 	id, token := chi.URLParam(r, "id"), sessionToken(r)
+	tenant, ok := reqTenant(w, r)
+	if !ok {
+		return
+	}
 	path := r.URL.Query().Get("path")
 	if path == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "path_required"})
@@ -158,7 +225,7 @@ func (s *Server) handleSessionFSPut(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"error": "too_large", "detail": err.Error()})
 		return
 	}
-	if err := s.Sessions.WriteFile(id, token, path, data); err != nil {
+	if err := s.Sessions.WriteFile(id, token, tenant, path, data); err != nil {
 		writeSessErr(w, err)
 		return
 	}
@@ -168,7 +235,11 @@ func (s *Server) handleSessionFSPut(w http.ResponseWriter, r *http.Request) {
 // DELETE /v1/sessions/{id}/fs?path=...
 func (s *Server) handleSessionFSDelete(w http.ResponseWriter, r *http.Request) {
 	id, token := chi.URLParam(r, "id"), sessionToken(r)
-	if err := s.Sessions.DeletePath(id, token, r.URL.Query().Get("path")); err != nil {
+	tenant, ok := reqTenant(w, r)
+	if !ok {
+		return
+	}
+	if err := s.Sessions.DeletePath(id, token, tenant, r.URL.Query().Get("path")); err != nil {
 		writeSessErr(w, err)
 		return
 	}
@@ -177,7 +248,11 @@ func (s *Server) handleSessionFSDelete(w http.ResponseWriter, r *http.Request) {
 
 // DELETE /v1/sessions/{id}
 func (s *Server) handleDestroySession(w http.ResponseWriter, r *http.Request) {
-	if err := s.Sessions.Destroy(chi.URLParam(r, "id"), sessionToken(r)); err != nil {
+	tenant, ok := reqTenant(w, r)
+	if !ok {
+		return
+	}
+	if err := s.Sessions.Destroy(chi.URLParam(r, "id"), sessionToken(r), tenant); err != nil {
 		writeSessErr(w, err)
 		return
 	}

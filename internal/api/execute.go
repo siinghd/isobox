@@ -29,14 +29,14 @@ func (s *Server) buildSpec(lang *registry.Language, req execRequest) (executor.S
 }
 
 type execRequest struct {
-	Language string            `json:"language"`
-	Version  string            `json:"version"`
-	Code     string            `json:"code"`  // convenience: single source file
-	Files    []executor.File   `json:"files"` // or explicit multi-file
-	Stdin    string            `json:"stdin"`
-	Args     []string          `json:"args"`
-	Limits   *limitsOverride   `json:"limits"`
-	Network  bool              `json:"network"`
+	Language string          `json:"language"`
+	Version  string          `json:"version"`
+	Code     string          `json:"code"`  // convenience: single source file
+	Files    []executor.File `json:"files"` // or explicit multi-file
+	Stdin    string          `json:"stdin"`
+	Args     []string        `json:"args"`
+	Limits   *limitsOverride `json:"limits"`
+	Network  bool            `json:"network"`
 }
 
 type limitsOverride struct {

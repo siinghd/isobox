@@ -5,14 +5,15 @@
 package api
 
 import (
-	"crypto/subtle"
 	"encoding/json"
 	"net/http"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/siinghd/isobox/internal/auth"
 	"github.com/siinghd/isobox/internal/executor"
+	"github.com/siinghd/isobox/internal/memory"
 	"github.com/siinghd/isobox/internal/registry"
 	"github.com/siinghd/isobox/internal/sched"
 	"github.com/siinghd/isobox/internal/session"
@@ -24,7 +25,7 @@ import (
 const (
 	maxMemoryBytes = 512 << 20 // 512 MiB
 	maxOutputBytes = 256 << 10 // 256 KiB
-	maxWallTimeMs  = 20_000     // 20 s
+	maxWallTimeMs  = 20_000    // 20 s
 	maxPids        = 256
 	maxCPUs        = 2.0
 	maxBodyBytes   = 256 << 10 // 256 KiB request body
@@ -32,21 +33,28 @@ const (
 
 // Server holds the wired dependencies shared by all handlers.
 type Server struct {
-	Reg         *registry.Registry
-	Exec        executor.Executor
-	Sema        *sched.Limiter
-	Sessions    *session.Manager // stateful sessions (v2); nil disables /v1/sessions
-	APIKey      string           // if non-empty, required via Bearer or X-API-Key
-	AcquireWait time.Duration    // max wait for a concurrency slot before 429
+	Reg      *registry.Registry
+	Exec     executor.Executor
+	Sema     *sched.Limiter
+	Sessions *session.Manager // stateful sessions (v2); nil disables /v1/sessions
+	Volumes  *memory.Manager  // tier-2 filesystem volumes; nil disables /v1/volumes
+	Memory   *memory.Store    // tier-3 bbolt KV; nil disables /v1/memory
+
+	// Keys is the single auth gate: it resolves an API key to a server-derived
+	// tenant id. There is NO separate APIKey field — that second gate was deleted
+	// so the keystore is the only authority (red-team: avoid a confusing second
+	// gate that never derives a tenant).
+	Keys *auth.KeyStore
+
+	AcquireWait time.Duration // max wait for a concurrency slot before 429
 	ipLimiter   *ipLimiter
 }
 
 // Config parameterises Router construction.
 type Config struct {
-	APIKey         string
-	AcquireWait    time.Duration
-	RatePerMin     int
-	RateBurst      int
+	AcquireWait time.Duration
+	RatePerMin  int
+	RateBurst   int
 }
 
 // Router builds the chi router with all middleware and routes.
@@ -97,28 +105,62 @@ func (s *Server) Router(cfg Config) http.Handler {
 		})
 	}
 
+	// Phase 3 tier-2: persistent filesystem VOLUMES. Tenant is server-derived in
+	// authMiddleware; every handler reads it via auth.TenantFrom.
+	if s.Volumes != nil {
+		r.Group(func(r chi.Router) {
+			r.Use(s.ipLimiter.middleware)
+			r.Use(s.authMiddleware)
+			r.With(maxBody(maxBodyBytes)).Post("/v1/volumes", s.handleCreateVolume)
+			r.Get("/v1/volumes", s.handleListVolumes)
+			r.Get("/v1/volumes/{id}", s.handleGetVolume)
+			r.Delete("/v1/volumes/{id}", s.handleDeleteVolume)
+		})
+	}
+
+	// Phase 3 tier-3: structured KV MEMORY. PUT bodies are capped at the single
+	// value size; list/get/delete carry no body.
+	if s.Memory != nil {
+		r.Group(func(r chi.Router) {
+			r.Use(s.ipLimiter.middleware)
+			r.Use(s.authMiddleware)
+			r.With(maxBody(maxKVValue)).Put("/v1/memory/{namespace}/{key}", s.handleKVPut)
+			r.Get("/v1/memory/{namespace}/{key}", s.handleKVGet)
+			r.Delete("/v1/memory/{namespace}/{key}", s.handleKVDelete)
+			r.Get("/v1/memory/{namespace}", s.handleKVList)
+		})
+	}
+
 	return r
 }
 
 // --- middleware & helpers --------------------------------------------------
 
+// authMiddleware is the ONE auth gate. It resolves the API key to a
+// server-derived tenant id via the keystore and stamps that tenant into the
+// request context (auth.WithTenant). Every downstream handler reads the tenant
+// ONLY via auth.TenantFrom — never from a body/query/path/header — which is the
+// load-bearing multi-tenancy invariant.
+//
+//   - empty keystore  => open/demo mode: tenant = auth.PublicTenant, allowed.
+//   - non-empty + match => tenant = hex(sha256(key)), allowed.
+//   - non-empty + miss  => 401.
+//
+// Constant-time key comparison happens inside KeyStore.Resolve.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.APIKey == "" { // open mode (public demo) — rate limit still applies
-			next.ServeHTTP(w, r)
-			return
-		}
 		key := r.Header.Get("X-API-Key")
 		if key == "" {
 			if b := r.Header.Get("Authorization"); len(b) > 7 && b[:7] == "Bearer " {
 				key = b[7:]
 			}
 		}
-		if subtle.ConstantTimeCompare([]byte(key), []byte(s.APIKey)) != 1 {
+		tenant, ok := s.Keys.Resolve(key)
+		if !ok {
 			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
 			return
 		}
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(w, r.WithContext(auth.WithTenant(r.Context(), tenant)))
 	})
 }
 
@@ -134,8 +176,9 @@ func maxBody(n int64) func(http.Handler) http.Handler {
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key, X-Session-Token, X-TTL-Seconds, If-None-Match")
+		w.Header().Set("Access-Control-Expose-Headers", "ETag, X-Expires-At")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return

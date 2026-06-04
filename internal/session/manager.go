@@ -41,19 +41,37 @@ var (
 )
 
 type Session struct {
-	ID           string
-	Token        string
-	Runtime      string
-	Type         string // "filesystem"
-	Workspace    string
-	CreatedAt    time.Time
-	IdleTTL      time.Duration
+	ID        string
+	Token     string
+	Runtime   string
+	Type      string // "filesystem"
+	Workspace string
+	CreatedAt time.Time
+	IdleTTL   time.Duration
+
+	// Tenant is the SERVER-DERIVED tenant id (auth.TenantFrom at Create), pinned
+	// for the life of the session. Every later op re-checks it (in addition to the
+	// capability token) so a leaked/shared token alone cannot reach this session's
+	// tenant-scoped /memory volume — the server-derived tenant, not just the
+	// bearer token, is authoritative. Red-team RT2.
+	Tenant string
+
+	// ExtraMounts are mounts beyond /workspace that every Exec step must replay —
+	// specifically an attached memory volume at /memory. Recording the attach is
+	// not enough: Exec has to append these on each step or the mount never appears
+	// in the sandbox. Set once at Create after a successful Attach. Advisor #2.
+	ExtraMounts []executor.Mount
+
 	mu           sync.Mutex
 	lastActivity time.Time
 }
 
-func (s *Session) touch()              { s.mu.Lock(); s.lastActivity = time.Now(); s.mu.Unlock() }
-func (s *Session) idle() time.Duration { s.mu.Lock(); defer s.mu.Unlock(); return time.Since(s.lastActivity) }
+func (s *Session) touch() { s.mu.Lock(); s.lastActivity = time.Now(); s.mu.Unlock() }
+func (s *Session) idle() time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return time.Since(s.lastActivity)
+}
 
 // Info is a token-checked, safe-to-return view of a session.
 type Info struct {
@@ -83,6 +101,12 @@ type Manager struct {
 	GlobalDiskMax int64 // aggregate ceiling for ALL sessions — the disk blast-radius cap
 	MaxSessions   int   // hard cap on concurrent sessions
 	DefaultTTL    time.Duration
+
+	// OnDrop, if set, is called with the session id whenever a session is removed
+	// (Destroy OR sweep-drop). The API wires this to volume.Manager.ReleaseAll so a
+	// crashed/swept session releases any RW volume hold instead of leaking the lock
+	// until process restart. Must not block. Red-team RT2 hardening / advisor #3.
+	OnDrop func(sessionID string)
 
 	mu       sync.RWMutex
 	sessions map[string]*Session
@@ -133,7 +157,17 @@ func NewManager(exec executor.Executor, reg *registry.Registry, sema *sched.Limi
 	}, nil
 }
 
-type CreateOpts struct{ TTL time.Duration }
+type CreateOpts struct {
+	TTL time.Duration
+
+	// Tenant is the server-derived tenant id from auth.TenantFrom(ctx). REQUIRED:
+	// it pins the session to a tenant. The API never reads it from a request field.
+	Tenant string
+
+	// ExtraMounts are non-/workspace mounts every step replays (the /memory volume).
+	// The API populates this via volume.Manager.Attach(Tenant, volumeId, id, true).
+	ExtraMounts []executor.Mount
+}
 
 // Create makes a new filesystem session: a workspace dir + a capability token.
 // No container is started (filesystem sessions are zero-RAM at rest).
@@ -166,14 +200,22 @@ func (m *Manager) Create(runtime string, o CreateOpts) (*Session, error) {
 		ttl = m.DefaultTTL
 	}
 	s := &Session{ID: id, Token: tok, Runtime: lang.Name, Type: "filesystem", Workspace: ws,
-		CreatedAt: time.Now(), lastActivity: time.Now(), IdleTTL: ttl}
+		CreatedAt: time.Now(), lastActivity: time.Now(), IdleTTL: ttl,
+		Tenant: o.Tenant, ExtraMounts: o.ExtraMounts}
 	m.mu.Lock()
 	m.sessions[id] = s
 	m.mu.Unlock()
 	return s, nil
 }
 
-func (m *Manager) authed(id, token string) (*Session, error) {
+// authed is the single chokepoint for every per-session op. It requires BOTH a
+// constant-time token match AND (when the caller passes a non-empty tenant) that
+// the request's server-derived tenant equals the session's pinned tenant. The
+// tenant compare is a plain == (the tenant id is not a secret; the token is the
+// secret and is already constant-time compared) — this closes the red-team
+// "token-only" door to a tenant's mounted /memory volume. Passing tenant=="" is
+// reserved for internal callers that have no ctx (none today).
+func (m *Manager) authed(id, token, tenant string) (*Session, error) {
 	m.mu.RLock()
 	s, ok := m.sessions[id]
 	m.mu.RUnlock()
@@ -183,20 +225,38 @@ func (m *Manager) authed(id, token string) (*Session, error) {
 	if subtle.ConstantTimeCompare([]byte(token), []byte(s.Token)) != 1 {
 		return nil, ErrForbidden
 	}
+	if tenant != "" && s.Tenant != tenant {
+		return nil, ErrForbidden // token valid but wrong tenant — never reach another tenant's session
+	}
 	return s, nil
 }
 
-// Runtime returns the session's language (token-checked) so the caller can build a Spec.
-func (m *Manager) Runtime(id, token string) (string, error) {
-	s, err := m.authed(id, token)
+// SetMounts records the extra mounts (the /memory volume) every Exec step must
+// replay. Called once by the API immediately after Create+Attach, BEFORE the
+// session token is returned to the caller, so no concurrent Exec can race it.
+// Token+tenant checked like every other op.
+func (m *Manager) SetMounts(id, token, tenant string, mounts []executor.Mount) error {
+	s, err := m.authed(id, token, tenant)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.ExtraMounts = mounts
+	s.mu.Unlock()
+	return nil
+}
+
+// Runtime returns the session's language (token+tenant-checked) so the caller can build a Spec.
+func (m *Manager) Runtime(id, token, tenant string) (string, error) {
+	s, err := m.authed(id, token, tenant)
 	if err != nil {
 		return "", err
 	}
 	return s.Runtime, nil
 }
 
-func (m *Manager) Get(id, token string) (Info, error) {
-	s, err := m.authed(id, token)
+func (m *Manager) Get(id, token, tenant string) (Info, error) {
+	s, err := m.authed(id, token, tenant)
 	if err != nil {
 		return Info{}, err
 	}
@@ -207,13 +267,19 @@ func (m *Manager) Get(id, token string) (Info, error) {
 // /workspace mounted RW and Workdir=/workspace, then runs as a fresh hardened
 // container. Shares the global concurrency gate. sink may be nil (buffered) or
 // an SSE sink (streamed).
-func (m *Manager) Exec(ctx context.Context, id, token string, spec executor.Spec, sink executor.OutputSink) (executor.Result, error) {
-	s, err := m.authed(id, token)
+func (m *Manager) Exec(ctx context.Context, id, token, tenant string, spec executor.Spec, sink executor.OutputSink) (executor.Result, error) {
+	s, err := m.authed(id, token, tenant)
 	if err != nil {
 		return executor.Result{}, err
 	}
 	spec.Workdir = "/workspace"
 	spec.Mounts = append(spec.Mounts, executor.Mount{HostPath: s.Workspace, Target: "/workspace", RW: true})
+	// Replay any attached memory volume (/memory) on EVERY step — recording the
+	// attach at Create is not sufficient; the mount must be present each run.
+	s.mu.Lock()
+	extra := append([]executor.Mount(nil), s.ExtraMounts...)
+	s.mu.Unlock()
+	spec.Mounts = append(spec.Mounts, extra...)
 	if !m.Sema.Acquire(ctx, m.AcquireWait) {
 		return executor.Result{}, ErrCapacity
 	}
@@ -223,14 +289,17 @@ func (m *Manager) Exec(ctx context.Context, id, token string, spec executor.Spec
 	return res, err
 }
 
-func (m *Manager) Destroy(id, token string) error {
-	s, err := m.authed(id, token)
+func (m *Manager) Destroy(id, token, tenant string) error {
+	s, err := m.authed(id, token, tenant)
 	if err != nil {
 		return err
 	}
 	m.mu.Lock()
 	delete(m.sessions, id)
 	m.mu.Unlock()
+	if m.OnDrop != nil {
+		m.OnDrop(s.ID) // release any RW volume hold this session held
+	}
 	return os.RemoveAll(filepath.Dir(s.Workspace)) // the per-session dir (parent of workspace)
 }
 
@@ -287,6 +356,9 @@ func (m *Manager) drop(s *Session, reason string) {
 	m.mu.Lock()
 	delete(m.sessions, s.ID)
 	m.mu.Unlock()
+	if m.OnDrop != nil {
+		m.OnDrop(s.ID) // release any RW volume hold so a swept session doesn't leak the lock
+	}
 	_ = os.RemoveAll(filepath.Dir(s.Workspace))
 	slog.Warn("session destroyed by sweep", "id", s.ID, "reason", reason)
 }
@@ -300,8 +372,8 @@ func (m *Manager) Count() int {
 
 // --- file operations (operate on the host workspace dir directly) ----------
 
-func (m *Manager) Stat(id, token, rel string) (FileInfo, error) {
-	s, err := m.authed(id, token)
+func (m *Manager) Stat(id, token, tenant, rel string) (FileInfo, error) {
+	s, err := m.authed(id, token, tenant)
 	if err != nil {
 		return FileInfo{}, err
 	}
@@ -316,8 +388,8 @@ func (m *Manager) Stat(id, token, rel string) (FileInfo, error) {
 	return FileInfo{Name: fi.Name(), Size: fi.Size(), Dir: fi.IsDir(), ModTime: fi.ModTime()}, nil
 }
 
-func (m *Manager) ReadFile(id, token, rel string) ([]byte, error) {
-	s, err := m.authed(id, token)
+func (m *Manager) ReadFile(id, token, tenant, rel string) ([]byte, error) {
+	s, err := m.authed(id, token, tenant)
 	if err != nil {
 		return nil, err
 	}
@@ -331,8 +403,8 @@ func (m *Manager) ReadFile(id, token, rel string) ([]byte, error) {
 	return os.ReadFile(p)
 }
 
-func (m *Manager) ListDir(id, token, rel string) ([]FileInfo, error) {
-	s, err := m.authed(id, token)
+func (m *Manager) ListDir(id, token, tenant, rel string) ([]FileInfo, error) {
+	s, err := m.authed(id, token, tenant)
 	if err != nil {
 		return nil, err
 	}
@@ -356,8 +428,8 @@ func (m *Manager) ListDir(id, token, rel string) ([]FileInfo, error) {
 	return out, nil
 }
 
-func (m *Manager) WriteFile(id, token, rel string, data []byte) error {
-	s, err := m.authed(id, token)
+func (m *Manager) WriteFile(id, token, tenant, rel string, data []byte) error {
+	s, err := m.authed(id, token, tenant)
 	if err != nil {
 		return err
 	}
@@ -382,8 +454,8 @@ func (m *Manager) WriteFile(id, token, rel string, data []byte) error {
 	return nil
 }
 
-func (m *Manager) DeletePath(id, token, rel string) error {
-	s, err := m.authed(id, token)
+func (m *Manager) DeletePath(id, token, tenant, rel string) error {
+	s, err := m.authed(id, token, tenant)
 	if err != nil {
 		return err
 	}
