@@ -2,8 +2,11 @@
 /bin/
 /dist/
 *.exe
-isobox
-isoboxd
+# Anchored to the repo root so these only ignore a root-level built binary —
+# a BARE `isoboxd` also matched the cmd/isoboxd/ SOURCE dir and silently kept
+# main.go out of the repo (the published tree wouldn't build).
+/isobox
+/isoboxd
 
 # Go
 /vendor/
