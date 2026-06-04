@@ -36,6 +36,8 @@ var (
 	ErrQuota     = errors.New("workspace disk quota exceeded")
 	ErrPath      = errors.New("invalid path")
 	ErrIsDir     = errors.New("path is a directory")
+	ErrDiskFull  = errors.New("session storage ceiling reached")
+	ErrTooMany   = errors.New("too many sessions")
 )
 
 type Session struct {
@@ -72,34 +74,61 @@ type FileInfo struct {
 // Manager owns session lifecycle. It is composed alongside the executor in the
 // API server, never inside the Executor interface.
 type Manager struct {
-	Backend     executor.Executor
-	Reg         *registry.Registry
-	Sema        *sched.Limiter // shared global concurrency gate (same one /execute uses)
-	Root        string
-	AcquireWait time.Duration
-	DiskQuota   int64 // per-session workspace byte cap
-	DefaultTTL  time.Duration
+	Backend       executor.Executor
+	Reg           *registry.Registry
+	Sema          *sched.Limiter // shared global concurrency gate (same one /execute uses)
+	Root          string
+	AcquireWait   time.Duration
+	DiskQuota     int64 // per-session workspace byte cap (enforced by the sweep, not just the API)
+	GlobalDiskMax int64 // aggregate ceiling for ALL sessions — the disk blast-radius cap
+	MaxSessions   int   // hard cap on concurrent sessions
+	DefaultTTL    time.Duration
 
 	mu       sync.RWMutex
 	sessions map[string]*Session
+	used     int64 // aggregate workspace bytes, refreshed by Sweep (checked at Create)
 }
 
-func NewManager(exec executor.Executor, reg *registry.Registry, sema *sched.Limiter, root string, diskQuota int64, ttl time.Duration) (*Manager, error) {
-	if root == "" {
+// Config parameterises NewManager.
+type Config struct {
+	Root          string
+	DiskQuota     int64 // per-session (default 512 MiB)
+	GlobalDiskMax int64 // aggregate (default 10 GiB)
+	MaxSessions   int   // default 200
+	TTL           time.Duration
+}
+
+func NewManager(exec executor.Executor, reg *registry.Registry, sema *sched.Limiter, cfg Config) (*Manager, error) {
+	if cfg.Root == "" {
 		return nil, fmt.Errorf("session root required")
 	}
-	if err := os.MkdirAll(root, 0o700); err != nil {
+	if err := os.MkdirAll(cfg.Root, 0o700); err != nil {
 		return nil, fmt.Errorf("create session root: %w", err)
 	}
-	if diskQuota <= 0 {
-		diskQuota = 512 << 20
+	// Startup reconcile: the in-proc map is empty after a restart, so any
+	// pre-existing session dirs are unreachable orphans — remove them so they
+	// cannot accumulate and consume disk across restarts.
+	if ents, err := os.ReadDir(cfg.Root); err == nil {
+		for _, e := range ents {
+			_ = os.RemoveAll(filepath.Join(cfg.Root, e.Name()))
+		}
 	}
-	if ttl <= 0 {
-		ttl = 24 * time.Hour
+	if cfg.DiskQuota <= 0 {
+		cfg.DiskQuota = 512 << 20
+	}
+	if cfg.GlobalDiskMax <= 0 {
+		cfg.GlobalDiskMax = 10 << 30
+	}
+	if cfg.MaxSessions <= 0 {
+		cfg.MaxSessions = 200
+	}
+	if cfg.TTL <= 0 {
+		cfg.TTL = 24 * time.Hour
 	}
 	return &Manager{
-		Backend: exec, Reg: reg, Sema: sema, Root: root,
-		AcquireWait: 2 * time.Second, DiskQuota: diskQuota, DefaultTTL: ttl,
+		Backend: exec, Reg: reg, Sema: sema, Root: cfg.Root,
+		AcquireWait: 2 * time.Second, DiskQuota: cfg.DiskQuota,
+		GlobalDiskMax: cfg.GlobalDiskMax, MaxSessions: cfg.MaxSessions, DefaultTTL: cfg.TTL,
 		sessions: make(map[string]*Session),
 	}, nil
 }
@@ -112,6 +141,15 @@ func (m *Manager) Create(runtime string, o CreateOpts) (*Session, error) {
 	lang, ok := m.Reg.Resolve(runtime, "")
 	if !ok {
 		return nil, fmt.Errorf("unknown runtime %q", runtime)
+	}
+	m.mu.RLock()
+	n, used := len(m.sessions), m.used
+	m.mu.RUnlock()
+	if n >= m.MaxSessions {
+		return nil, ErrTooMany
+	}
+	if used >= m.GlobalDiskMax {
+		return nil, ErrDiskFull
 	}
 	tok, err := mintToken()
 	if err != nil {
@@ -196,21 +234,61 @@ func (m *Manager) Destroy(id, token string) error {
 	return os.RemoveAll(filepath.Dir(s.Workspace)) // the per-session dir (parent of workspace)
 }
 
-// ReapIdle deletes sessions whose workspace has been idle past their TTL.
-func (m *Manager) ReapIdle(ctx context.Context) {
-	m.mu.Lock()
-	var dead []*Session
-	for id, s := range m.sessions {
+// Sweep enforces the disk blast-radius bounds and idle TTLs against ACTUAL disk
+// usage (not the API-tracked counter), so it catches code that writes directly
+// to /workspace and bypasses the WriteFile quota. Order: reap idle/TTL; destroy
+// any session over its per-session quota; then, if the aggregate is still over
+// the global ceiling, destroy the largest sessions until under. Refreshes
+// m.used for Create's fast-path check.
+func (m *Manager) Sweep(_ context.Context) {
+	m.mu.RLock()
+	snap := make([]*Session, 0, len(m.sessions))
+	for _, s := range m.sessions {
+		snap = append(snap, s)
+	}
+	m.mu.RUnlock()
+
+	type sized struct {
+		s    *Session
+		size int64
+	}
+	var live []sized
+	var total int64
+	for _, s := range snap {
 		if s.idle() > s.IdleTTL {
-			dead = append(dead, s)
-			delete(m.sessions, id)
+			m.drop(s, "idle TTL")
+			continue
+		}
+		sz := dirSize(s.Workspace)
+		if sz > m.DiskQuota {
+			m.drop(s, "over per-session disk quota")
+			continue
+		}
+		total += sz
+		live = append(live, sized{s, sz})
+	}
+	if total > m.GlobalDiskMax {
+		sort.Slice(live, func(i, j int) bool { return live[i].size > live[j].size })
+		for _, l := range live {
+			if total <= m.GlobalDiskMax {
+				break
+			}
+			m.drop(l.s, "global disk ceiling")
+			total -= l.size
 		}
 	}
+	m.mu.Lock()
+	m.used = total
 	m.mu.Unlock()
-	for _, s := range dead {
-		_ = os.RemoveAll(filepath.Dir(s.Workspace))
-		slog.Info("session reaped (idle TTL)", "id", s.ID, "ttl", s.IdleTTL.String())
-	}
+}
+
+// drop removes a session and its workspace (used by Sweep).
+func (m *Manager) drop(s *Session, reason string) {
+	m.mu.Lock()
+	delete(m.sessions, s.ID)
+	m.mu.Unlock()
+	_ = os.RemoveAll(filepath.Dir(s.Workspace))
+	slog.Warn("session destroyed by sweep", "id", s.ID, "reason", reason)
 }
 
 // Count reports the number of live sessions.

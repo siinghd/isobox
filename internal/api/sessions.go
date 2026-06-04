@@ -42,7 +42,15 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	}
 	sess, err := s.Sessions.Create(req.Runtime, session.CreateOpts{TTL: time.Duration(req.TTLSec) * time.Second})
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "create_failed", "detail": err.Error()})
+		switch {
+		case errors.Is(err, session.ErrTooMany):
+			w.Header().Set("Retry-After", "5")
+			writeJSON(w, http.StatusTooManyRequests, map[string]any{"error": "too_many_sessions"})
+		case errors.Is(err, session.ErrDiskFull):
+			writeJSON(w, http.StatusInsufficientStorage, map[string]any{"error": "storage_full", "detail": "session storage ceiling reached"})
+		default:
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "create_failed", "detail": err.Error()})
+		}
 		return
 	}
 	writeJSON(w, http.StatusCreated, createSessionResponse{
