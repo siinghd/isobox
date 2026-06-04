@@ -142,12 +142,14 @@ Single binary, stateless gateway. Single node uses an in-process semaphore-gated
 - [x] gVisor backend, sync + SSE, hardened-by-default, hard-capped slice
 - [x] Languages: Python, JavaScript, TypeScript, Ruby, Go, Rust
 - [x] **Firewalled network egress** for agents (public-only; metadata/private/host/SMTP blocked)
-- [x] **Batteries-included Python** (requests/httpx, BeautifulSoup/lxml, pandas/numpy…)
-- [x] Pre-warmed Go image (≈14s → ≈2s)
-- [x] Dependency-free Python + JS clients
-- [ ] Warm single-use sandbox pool to shave interpreted cold-start
+- [x] **Batteries-included Python** + pre-warmed Go; dependency-free Python + JS clients
+- [x] **Stateful sessions** — persistent `/workspace`, file upload/download, multi-step exec (`/v1/sessions`)
+- [x] **Live-kernel sessions** — variables persist across steps, Code-Interpreter style (`type: kernel`)
+- [x] **Persistent memory** — multi-tenant KV (`/v1/memory`) + re-attachable volumes (`/v1/volumes`, `/memory`)
+- [x] **Scale primitives** — warm pool, Prometheus `/metrics`, Valkey-Streams queue (default-off)
+- [x] `llms.txt` + OpenAPI 3.1 served live
+- [ ] Harden warm pool (per-request limits) + Valkey driver before enabling in prod
 - [ ] More languages (C/C++, Bash, Java) + Piston-compatible `/api/v2/execute` shim
-- [ ] Valkey queue + multi-node workers, Prometheus metrics
 - [ ] Firecracker and hardened-runc backends
 - [ ] Cloudflare Turnstile + Authenticated Origin Pull for the public demo
 
