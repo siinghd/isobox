@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>isobox — run untrusted code, safely</title>
+<meta name="description" content="Open-source, self-hostable sandbox for running untrusted / AI-generated code. Isolated by gVisor. No KVM required." />
+<style>
+  :root{
+    --bg:#0b0e14; --panel:#11151f; --panel2:#161b27; --border:#222a3a;
+    --fg:#d7dce5; --muted:#8a93a6; --accent:#5db8ff; --accent2:#7c5cff;
+    --ok:#41d39a; --err:#ff6b6b; --warn:#ffd166; --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+  a{color:var(--accent);text-decoration:none}
+  header{display:flex;align-items:center;gap:14px;padding:14px 20px;border-bottom:1px solid var(--border);background:linear-gradient(180deg,#0d1119,#0b0e14)}
+  .logo{font-weight:700;font-size:18px;letter-spacing:.3px}
+  .logo b{background:linear-gradient(90deg,var(--accent),var(--accent2));-webkit-background-clip:text;background-clip:text;color:transparent}
+  .tag{color:var(--muted);font-size:12.5px}
+  header .spacer{flex:1}
+  header .gh{color:var(--muted);font-size:13px}
+  .wrap{display:grid;grid-template-columns:1fr 1fr;gap:0;height:calc(100% - 56px - 30px)}
+  @media(max-width:860px){.wrap{grid-template-columns:1fr;height:auto}}
+  .pane{display:flex;flex-direction:column;min-height:0;border-right:1px solid var(--border)}
+  .pane:last-child{border-right:none}
+  .bar{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--border);background:var(--panel)}
+  select,button,input{font:inherit;color:var(--fg);background:var(--panel2);border:1px solid var(--border);border-radius:8px;padding:7px 11px;outline:none}
+  select:focus,input:focus{border-color:var(--accent)}
+  button.run{background:linear-gradient(90deg,var(--accent),var(--accent2));border:none;color:#06101c;font-weight:700;cursor:pointer;padding:7px 18px}
+  button.run:disabled{opacity:.55;cursor:default}
+  .bar .spacer{flex:1}
+  .hint{color:var(--muted);font-size:12px}
+  .net{display:flex;align-items:center;gap:5px;font-size:12.5px;color:var(--muted);cursor:pointer;user-select:none}
+  .net input{accent-color:var(--accent);cursor:pointer}
+  textarea{flex:1;width:100%;resize:none;border:none;outline:none;background:var(--bg);color:var(--fg);font:13px/1.55 var(--mono);padding:14px;tab-size:4}
+  .stdin{border-top:1px solid var(--border);background:var(--panel)}
+  .stdin summary{cursor:pointer;color:var(--muted);padding:8px 14px;font-size:12.5px;user-select:none}
+  .stdin textarea{height:80px;background:var(--panel2)}
+  #out{flex:1;margin:0;padding:14px;overflow:auto;font:13px/1.5 var(--mono);white-space:pre-wrap;word-break:break-word}
+  #out .e{color:var(--err)}
+  #out .meta{color:var(--muted)}
+  .status{display:flex;gap:8px;align-items:center;padding:9px 14px;border-top:1px solid var(--border);background:var(--panel);min-height:40px;flex-wrap:wrap}
+  .badge{font-size:11.5px;padding:3px 9px;border-radius:999px;border:1px solid var(--border);color:var(--muted)}
+  .badge.ok{color:var(--ok);border-color:#1c5b45}
+  .badge.err{color:var(--err);border-color:#5b1f1f}
+  .badge.warn{color:var(--warn);border-color:#5b4a1c}
+  .badge.live{color:var(--accent)}
+  footer{height:30px;display:flex;align-items:center;gap:16px;padding:0 20px;border-top:1px solid var(--border);color:var(--muted);font-size:12px;background:var(--panel)}
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--ok);display:inline-block;margin-right:6px;box-shadow:0 0 8px var(--ok)}
+  kbd{font:11px var(--mono);background:var(--panel2);border:1px solid var(--border);border-bottom-width:2px;border-radius:5px;padding:1px 5px}
+</style>
+</head>
+<body>
+<header>
+  <div class="logo"><b>isobox</b></div>
+  <div class="tag">run untrusted code, safely — isolated by gVisor</div>
+  <div class="spacer"></div>
+  <a class="gh" href="https://github.com/siinghd/isobox" target="_blank" rel="noopener">★ GitHub</a>
+</header>
+
+<div class="wrap">
+  <section class="pane">
+    <div class="bar">
+      <select id="lang" title="language"></select>
+      <select id="example" title="examples"><option value="">examples…</option></select>
+      <div class="spacer"></div>
+      <label class="net" title="Allow filtered internet egress (public only — metadata/private/host are firewalled)"><input type="checkbox" id="network"> 🌐 net</label>
+      <span class="hint"><kbd>Ctrl</kbd>+<kbd>Enter</kbd></span>
+      <button class="run" id="run">Run ▸</button>
+    </div>
+    <textarea id="code" spellcheck="false" placeholder="// write code, hit Run"></textarea>
+    <details class="stdin">
+      <summary>stdin (optional)</summary>
+      <textarea id="stdin" spellcheck="false" placeholder="fed to the program's standard input"></textarea>
+    </details>
+  </section>
+
+  <section class="pane">
+    <div class="bar"><span class="hint">output</span><div class="spacer"></div><span class="hint" id="backend"></span></div>
+    <pre id="out"><span class="meta">Output appears here. Code runs in a gVisor sandbox: no network, read-only filesystem, memory/CPU/time capped, then destroyed.</span></pre>
+    <div class="status" id="status"></div>
+  </section>
+</div>
+
+<footer>
+  <span><span class="dot"></span>gVisor systrap • network off • ephemeral</span>
+  <span>·</span>
+  <span>Apache-2.0</span>
+  <span>·</span>
+  <span>self-host: <a href="https://github.com/siinghd/isobox" target="_blank" rel="noopener">one binary</a></span>
+</footer>
+
+<script>
+const $ = s => document.querySelector(s);
+const out = $('#out'), statusEl = $('#status');
+
+// Values are a string, or {code, net:true} to auto-enable filtered egress.
+const EXAMPLES = {
+  python: {
+    "hello": `print("hello from isobox")\nprint(sum(range(100)))`,
+    "🌐 fetch JSON API": { net: true, code: `import requests\nr = requests.get("https://api.github.com/repos/google/gvisor", timeout=8)\nd = r.json()\nprint("gvisor:", d["stargazers_count"], "stars,", d["forks"], "forks")` },
+    "🌐 scrape HTML (BeautifulSoup)": { net: true, code: `import requests\nfrom bs4 import BeautifulSoup\nhtml = requests.get("https://news.ycombinator.com", timeout=8).text\nsoup = BeautifulSoup(html, "lxml")\nfor a in soup.select("span.titleline > a")[:5]:\n    print("-", a.text)` },
+    "🌐 analyze data (pandas)": { net: true, code: `import requests, io, pandas as pd\ncsv = requests.get("https://raw.githubusercontent.com/mwaskom/seaborn-data/master/iris.csv", timeout=8).text\ndf = pd.read_csv(io.StringIO(csv))\nprint(df.groupby("species")["sepal_length"].mean().round(2).to_string())` },
+    "🌐 concurrent fetch (httpx)": { net: true, code: `import httpx, asyncio\nURLS = ["https://example.com", "https://httpbin.org/uuid", "https://api.github.com"]\nasync def main():\n    async with httpx.AsyncClient(timeout=8) as c:\n        rs = await asyncio.gather(*[c.get(u) for u in URLS])\n        for u, r in zip(URLS, rs): print(r.status_code, u)\nasyncio.run(main())` },
+    "escape? (filesystem)": `open("/etc/passwd","a").write("x")  # read-only rootfs`,
+    "killed (wall-time)": `import time\nprint("working...", flush=True)\ntime.sleep(60)  # killed at the cap`,
+  },
+  javascript: {
+    "hello": `console.log("hello from isobox");\nconsole.log([1,2,3,4].reduce((a,b)=>a+b));`,
+    "🌐 fetch JSON": { net: true, code: `const r = await fetch("https://api.github.com/repos/nodejs/node");\nconst d = await r.json();\nconsole.log("node:", d.stargazers_count, "stars");` },
+  },
+  typescript: {
+    "hello": `const greet = (name: string): string => \`hello \${name}\`;\nconsole.log(greet("isobox"));`,
+    "🌐 typed fetch": { net: true, code: `type Repo = { stargazers_count: number };\nconst r = await fetch("https://api.github.com/repos/microsoft/TypeScript");\nconst d = (await r.json()) as Repo;\nconsole.log("TS stars:", d.stargazers_count);` },
+  },
+  ruby: {
+    "hello": `puts "hello from isobox"\nputs (1..100).sum`,
+    "🌐 fetch": { net: true, code: `require "net/http"\nputs Net::HTTP.get(URI("https://api.github.com/repos/ruby/ruby")).length, "bytes fetched"` },
+  },
+  go: {
+    "hello (compiles)": `package main\nimport "fmt"\nfunc main() {\n    fmt.Println("hello from isobox")\n}`,
+    "🌐 fetch": { net: true, code: `package main\nimport ("fmt";"net/http";"io")\nfunc main() {\n    r, _ := http.Get("https://api.github.com/repos/golang/go")\n    b, _ := io.ReadAll(r.Body)\n    fmt.Println(len(b), "bytes")\n}` },
+  },
+  rust: {
+    "hello (compiles)": `fn main() {\n    let sum: i32 = (1..=100).sum();\n    println!("hello from isobox, sum={sum}");\n}`,
+  },
+};
+const exCode = v => (v && typeof v === "object") ? v.code : v;
+const exNet  = v => !!(v && typeof v === "object" && v.net);
+
+async function loadRuntimes(){
+  try{
+    const r = await fetch('/runtimes'); const langs = await r.json();
+    const sel = $('#lang'); sel.innerHTML='';
+    langs.forEach(l=>{ const o=document.createElement('option'); o.value=l.language; o.textContent=`${l.language} ${l.version}`; sel.appendChild(o); });
+    $('#backend').textContent = langs[0] ? `backend: ${langs[0].backend}` : '';
+    syncExamples();
+  }catch(e){ $('#backend').textContent='offline'; }
+}
+function syncExamples(){
+  const lang=$('#lang').value, ex=EXAMPLES[lang]||{}, sel=$('#example');
+  sel.innerHTML='<option value="">examples…</option>';
+  Object.keys(ex).forEach(k=>{ const o=document.createElement('option'); o.value=k; o.textContent=k; sel.appendChild(o); });
+  if(!$('#code').value && ex.hello) $('#code').value = exCode(ex.hello);
+}
+$('#lang').addEventListener('change', syncExamples);
+$('#example').addEventListener('change', e=>{
+  const v=(EXAMPLES[$('#lang').value]||{})[e.target.value];
+  if(v!=null){ $('#code').value=exCode(v); $('#network').checked=exNet(v); }
+});
+
+$('#code').addEventListener('keydown', e=>{
+  if(e.key==='Tab'){ e.preventDefault(); const t=e.target,s=t.selectionStart; t.value=t.value.slice(0,s)+'    '+t.value.slice(t.selectionEnd); t.selectionStart=t.selectionEnd=s+4; }
+  if((e.ctrlKey||e.metaKey)&&e.key==='Enter') run();
+});
+
+function badge(text,cls){ const b=document.createElement('span'); b.className='badge '+(cls||''); b.textContent=text; statusEl.appendChild(b); }
+function append(text,cls){ const s=document.createElement('span'); if(cls)s.className=cls; s.textContent=text; out.appendChild(s); out.scrollTop=out.scrollHeight; }
+
+let running=false;
+async function run(){
+  if(running) return; running=true;
+  $('#run').disabled=true; out.textContent=''; statusEl.innerHTML=''; badge('running…','live');
+  const body = JSON.stringify({ language:$('#lang').value, code:$('#code').value, stdin:$('#stdin').value, network:$('#network').checked });
+  const t0=performance.now();
+  try{
+    const r = await fetch('/execute',{method:'POST',headers:{'Content-Type':'application/json','Accept':'text/event-stream'},body});
+    if(r.status===429){ statusEl.innerHTML=''; badge('rate limited / at capacity','warn'); badge('retry in a moment','meta'); return; }
+    if(!r.body){ const j=await r.json(); renderDone(j); return; }
+    const reader=r.body.getReader(), dec=new TextDecoder(); let buf='';
+    for(;;){
+      const {value,done}=await reader.read(); if(done) break;
+      buf+=dec.decode(value,{stream:true});
+      let idx;
+      while((idx=buf.indexOf('\n\n'))>=0){
+        const raw=buf.slice(0,idx); buf=buf.slice(idx+2);
+        const ev=/event: (\w+)/.exec(raw), dt=/data: (.*)/s.exec(raw);
+        if(!ev||!dt) continue;
+        const payload=JSON.parse(dt[1]);
+        if(ev[1]==='stdout') append(payload.chunk);
+        else if(ev[1]==='stderr') append(payload.chunk,'e');
+        else if(ev[1]==='done') renderDone(payload);
+        else if(ev[1]==='error'){ statusEl.innerHTML=''; badge('error','err'); append('\n'+payload.error,'e'); }
+      }
+    }
+  }catch(e){ statusEl.innerHTML=''; badge('request failed','err'); append('\n'+e.message,'e'); }
+  finally{ running=false; $('#run').disabled=false; }
+}
+function renderDone(p){
+  const run=p.run||p; statusEl.innerHTML='';
+  badge('exit '+run.exitCode, run.exitCode===0?'ok':'err');
+  if(run.timedOut) badge('⏱ timed out','warn');
+  if(run.oomKilled) badge('⊘ out of memory','warn');
+  if(run.truncated) badge('output truncated','meta');
+  badge(run.durationMs+' ms','meta');
+}
+$('#run').addEventListener('click', run);
+loadRuntimes();
+</script>
+</body>
+</html>

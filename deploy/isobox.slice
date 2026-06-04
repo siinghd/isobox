@@ -1,0 +1,21 @@
+# isobox.slice — the blast-radius ceiling for the entire sandbox subsystem.
+# Every sandbox container runs nested under this slice (--cgroup-parent=isobox.slice),
+# so the aggregate memory of ALL concurrent sandboxes can never exceed MemoryMax.
+# On a shared box this is the single control that guarantees a runaway sandbox
+# cannot OOM the ~50 neighboring services or thrash an already-full swap.
+[Unit]
+Description=isobox sandbox subsystem (hard-capped aggregate cgroup)
+Before=slices.target
+
+[Slice]
+MemoryAccounting=yes
+MemoryMax=2G
+MemoryHigh=1700M
+MemorySwapMax=0
+CPUAccounting=yes
+CPUWeight=200
+# Hard ceiling on aggregate CPU for ALL sandboxes (6 of 8 cores), leaving
+# headroom for the host's other services under a burst of CPU-bound runs.
+CPUQuota=600%
+TasksAccounting=yes
+TasksMax=512

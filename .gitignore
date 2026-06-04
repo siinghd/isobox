@@ -1,0 +1,34 @@
+# Binaries
+/bin/
+/dist/
+*.exe
+isobox
+isoboxd
+
+# Go
+/vendor/
+*.test
+*.out
+coverage.*
+
+# Runtime / local state
+*.log
+/data/
+/run/
+*.pid
+.env
+.env.*
+!.env.example
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Python
+__pycache__/
+*.pyc
+
+# local prod backups
+deploy/daemon.json.bak*

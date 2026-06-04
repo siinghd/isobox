@@ -1,0 +1,158 @@
+# isobox language registry — declarative, hot-reloadable (SIGHUP).
+#
+# Each entry is a TRUSTED launch recipe. `image` is always digest-pinned (never
+# :latest) for reproducibility and supply-chain safety. `compile` is null for
+# interpreted languages. `run` is the argv; the caller's program arguments are
+# appended after it (passed safely as positional shell params, never
+# interpolated). `scratch_exec: true` mounts /tmp executable for languages that
+# build/run a binary there (compiled langs); interpreted langs keep /tmp noexec.
+#
+# Adding a language is a config entry — no code change. Digests below were
+# resolved on linux/arm64.
+languages:
+  # Default Python = the batteries-included AGENT image: requests/httpx/aiohttp,
+  # beautifulsoup4/lxml/parsel, pandas/numpy/pyarrow, etc. Built locally from
+  # deploy/images/python-agent (never pulled). Libs work with network OFF
+  # (compute); add "network": true to fetch/scrape. Zero-build fallback below.
+  - name: python
+    version: "3.14-agent"
+    aliases: [py, py3, python3]
+    image: "isobox/python-agent:1"
+    source_file: main.py
+    compile: null
+    run: ["python", "/box/main.py"]
+    workdir: /box
+    env:
+      HOME: /tmp
+    scratch_exec: false
+    limits:
+      memory_bytes: 402653184 # 384 MiB (room for pandas/numpy + a fetch)
+      cpus: "1.5"
+      pids_limit: 128
+      wall_time_sec: 15
+      compile_time_sec: 0
+      output_bytes: 65536
+
+  - name: python-slim
+    version: "3.14.5"
+    aliases: [pyslim]
+    image: "python:3-slim@sha256:c845af9399020c7e562969a13689e929074a10fd057acd1b1fad06a2fb068e97"
+    source_file: main.py
+    compile: null
+    run: ["python", "/box/main.py"]
+    workdir: /box
+    env:
+      HOME: /tmp
+    scratch_exec: false
+    limits:
+      memory_bytes: 268435456 # 256 MiB
+      cpus: "1.0"
+      pids_limit: 128
+      wall_time_sec: 10
+      compile_time_sec: 0
+      output_bytes: 65536
+
+  - name: javascript
+    version: "node-26"
+    aliases: [js, node, nodejs]
+    image: "node@sha256:aa27a5fbf5acb298116a38133794f080406c6f8dfe52e2e2836bb55dc7cae8f0"
+    source_file: main.js
+    compile: null
+    run: ["node", "/box/main.js"]
+    workdir: /box
+    env:
+      HOME: /tmp
+    scratch_exec: false
+    limits:
+      memory_bytes: 268435456
+      cpus: "1.0"
+      pids_limit: 128
+      wall_time_sec: 10
+      compile_time_sec: 0
+      output_bytes: 65536
+
+  - name: typescript
+    version: "node-26"
+    aliases: [ts]
+    image: "node@sha256:aa27a5fbf5acb298116a38133794f080406c6f8dfe52e2e2836bb55dc7cae8f0"
+    source_file: main.ts
+    compile: null # Node >= 23 strips types natively
+    run: ["node", "--experimental-strip-types", "/box/main.ts"]
+    workdir: /box
+    env:
+      HOME: /tmp
+    scratch_exec: false
+    limits:
+      memory_bytes: 268435456
+      cpus: "1.0"
+      pids_limit: 128
+      wall_time_sec: 10
+      compile_time_sec: 0
+      output_bytes: 65536
+
+  - name: ruby
+    version: "3-alpine"
+    aliases: [rb]
+    image: "ruby@sha256:8a962e98ec8b999097accdf3bdc564c7a5f67360f4d418c0074e7fa49b148185"
+    source_file: main.rb
+    compile: null
+    run: ["ruby", "/box/main.rb"]
+    workdir: /box
+    env:
+      HOME: /tmp
+    scratch_exec: false
+    limits:
+      memory_bytes: 268435456
+      cpus: "1.0"
+      pids_limit: 128
+      wall_time_sec: 10
+      compile_time_sec: 0
+      output_bytes: 65536
+
+  # --- compiled: compile-then-run in one sandbox; /tmp is executable ---
+  # PRE-WARMED Go (isobox/go-agent, built from deploy/images/go-agent): copies a
+  # baked stdlib build cache into the writable scratch, then `go run`. Cuts cold
+  # start from ~14s to ~2s. (cp -r, not -a: nobody can't preserve root ownership,
+  # and Go's cache validity is content-hash based, so ownership/mtime don't matter.)
+  - name: go
+    version: "1.24-warm"
+    aliases: [golang]
+    image: "isobox/go-agent:1"
+    source_file: main.go
+    compile: ["cp", "-r", "/opt/gocache", "/tmp/gocache"]
+    run: ["go", "run", "/box/main.go"]
+    workdir: /box
+    env:
+      HOME: /tmp
+      GOCACHE: /tmp/gocache
+      GOPATH: /tmp/go
+      GOFLAGS: "-mod=mod"
+    scratch_exec: true
+    scratch_mb: 512 # warm cache (~90MB) + new build artifacts + linked binary
+    limits:
+      memory_bytes: 536870912 # 512 MiB
+      cpus: "2.0"
+      pids_limit: 128
+      wall_time_sec: 20
+      compile_time_sec: 20
+      output_bytes: 65536
+
+  - name: rust
+    version: "1-alpine"
+    aliases: [rs]
+    image: "rust@sha256:66f48b19d6e88519e2e58bebe0d945779a6a4ca41c2db17db78c9569655b50ac"
+    source_file: main.rs
+    compile: ["rustc", "-O", "-o", "/tmp/prog", "/box/main.rs"]
+    run: ["/tmp/prog"]
+    workdir: /box
+    env:
+      HOME: /tmp
+    scratch_exec: true
+    scratch_mb: 256
+    limits:
+      memory_bytes: 536870912
+      cpus: "2.0"
+      pids_limit: 128
+      wall_time_sec: 20
+      compile_time_sec: 20
+      output_bytes: 65536

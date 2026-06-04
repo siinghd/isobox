@@ -1,0 +1,34 @@
+# isoboxd — the isobox control plane. Runs as the deploy user (must be in the
+# `docker` group). Sandboxes it launches nest under isobox.slice via the
+# executor's --cgroup-parent; THIS unit's own cap covers only the Go process and
+# the short-lived `docker` CLI clients it spawns.
+[Unit]
+Description=isobox sandbox control plane
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=deploy
+Group=deploy
+WorkingDirectory=/home/deploy/isobox
+ExecStart=/home/deploy/isobox/bin/isoboxd
+Restart=on-failure
+RestartSec=2
+
+Environment=ISOBOX_ADDR=127.0.0.1:8090
+Environment=ISOBOX_REGISTRY=/home/deploy/isobox/internal/registry/registry.yaml
+Environment=ISOBOX_CONCURRENCY=4
+Environment=ISOBOX_RATE_PER_MIN=30
+Environment=ISOBOX_RATE_BURST=10
+Environment=ISOBOX_LOG_LEVEL=info
+# Set ISOBOX_API_KEY here to require a key (leave unset for an open, rate-limited demo).
+
+# Control-plane footprint (NOT the sandbox ceiling — that is isobox.slice).
+MemoryHigh=256M
+MemoryMax=512M
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

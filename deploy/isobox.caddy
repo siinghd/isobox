@@ -1,0 +1,23 @@
+# isobox public demo — drop into /etc/caddy/sites.d/ and `caddy reload`.
+# A specific-subdomain block beats the wildcard *.hsingh.app catch-all.
+isobox.hsingh.app {
+	import origin_tls
+	encode gzip zstd
+
+	# Match the control plane's 256 KiB request-body ceiling at the edge.
+	request_body {
+		max_size 256KB
+	}
+
+	reverse_proxy 127.0.0.1:8090 {
+		# REQUIRED for Server-Sent Events: without this Caddy buffers the
+		# response and the live token stream is silently withheld until EOF.
+		flush_interval -1
+		# Hand the real client IP to the app for per-IP rate limiting (the
+		# global Caddyfile already trusts Cloudflare and exposes CF-Connecting-IP).
+		header_up X-Real-IP {http.request.header.CF-Connecting-IP}
+		# Strip a client-forged True-Client-IP so it can never become the
+		# rate-limit key (defense in depth; the app also ignores it).
+		header_up -True-Client-IP
+	}
+}

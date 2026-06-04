@@ -1,0 +1,15 @@
+# Re-asserts the isobox egress firewall every 60s and refreshes the fail-closed
+# heartbeat sentinel. If anything ever flushes the rules (e.g. `systemctl restart
+# docker` rebuilds DOCKER-USER), they are restored within ~60s and, until then,
+# isoboxd refuses network mode because the sentinel has gone stale.
+[Unit]
+Description=Re-assert isobox egress firewall (self-heal + heartbeat)
+Requires=isobox-egress.service
+
+[Timer]
+OnBootSec=90s
+OnUnitActiveSec=60s
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target

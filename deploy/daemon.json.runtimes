@@ -1,0 +1,12 @@
+{
+  "runtimes": {
+    "runsc-untrusted": {
+      "path": "/usr/local/bin/runsc",
+      "runtimeArgs": ["--platform=systrap","--network=none","--host-uds=none","--host-fifo=none","--file-access=exclusive","--net-raw=false"]
+    },
+    "runsc-net": {
+      "path": "/usr/local/bin/runsc",
+      "runtimeArgs": ["--platform=systrap","--host-uds=none","--host-fifo=none","--file-access=exclusive","--net-raw=false"]
+    }
+  }
+}

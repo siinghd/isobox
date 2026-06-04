@@ -1,0 +1,14 @@
+# Installs the isobox filtered-egress network + firewall on boot (idempotent).
+# Required for opt-in network:true sandboxes; harmless if you never enable them.
+[Unit]
+Description=isobox filtered egress network + firewall
+After=docker.service
+Requires=docker.service
+Before=isoboxd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/env bash /home/deploy/isobox/deploy/egress-setup.sh
+
+[Install]
+WantedBy=multi-user.target
