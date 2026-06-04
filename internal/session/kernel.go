@@ -209,14 +209,14 @@ type kResp struct {
 // attaches to it. workspaceMounts (the session /workspace, plus any /memory
 // volume) are bind-mounted RW so the filesystem persists alongside the namespace.
 // Caller MUST already hold a kernel slot — Manager.Create acquires it before this.
-func (e *KernelEngine) NewKernel(parent context.Context, id, image string, mounts []executor.Mount) (*kernel, error) {
+func (e *KernelEngine) NewKernel(parent context.Context, id, image string, mounts []executor.Mount, network bool) (*kernel, error) {
 	name := "iso-kernel-" + uuid.NewString()
 
 	// 1. Start the container detached, with stdin kept OPEN (-i) and NO TTY (so
 	//    stdout/stderr are not merged and our JSON frames stay byte-clean). The
 	//    command is the harness, fed inline via `python -c` so no file install is
 	//    needed. python -u => unbuffered (we also line-buffer inside the harness).
-	runArgs := e.buildKernelRunArgs(name, id, image, mounts)
+	runArgs := e.buildKernelRunArgs(name, id, image, mounts, network)
 	runArgs = append(runArgs, "python", "-u", "-c", harnessPy)
 	if out, err := exec.CommandContext(parent, "docker", append([]string{"run"}, runArgs...)...).CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("docker run kernel: %w: %s", err, string(out))
@@ -552,13 +552,28 @@ func (k *kernel) isDead() bool {
 // no source bind (code arrives over stdin), an extra isobox.session=<id> label so
 // the Manager's reaper can find it by session, and HOME=/tmp + the harness output
 // budget passed via env.
-func (e *KernelEngine) buildKernelRunArgs(name, sessionID, image string, mounts []executor.Mount) []string {
+func (e *KernelEngine) buildKernelRunArgs(name, sessionID, image string, mounts []executor.Mount, network bool) []string {
 	mem := e.cfg.MemoryBytes
+	// Default: no network (runsc-untrusted forces --network=none). When the kernel
+	// is created with network on AND the egress firewall is live, use the net
+	// runtime + the filtered egress bridge + public resolv.conf — same posture as a
+	// one-shot networked job. A running container's network can't change, so this
+	// is decided once at create time.
+	runtime, netFlag := e.gv.Runtime, "--network=none"
+	var resolvMount []string
+	if network {
+		if rt, net, resolv, ok := e.gv.NetMode(); ok {
+			runtime, netFlag = rt, "--network="+net
+			if resolv != "" {
+				resolvMount = []string{"-v", resolv + ":/etc/resolv.conf:ro"}
+			}
+		}
+	}
 	a := []string{
 		"-d", "-i", // detached, stdin OPEN for the attach channel. NO -t (keep streams unmerged).
 		"--name", name,
-		"--runtime", e.gv.Runtime, // runsc-untrusted: forces --network=none
-		"--network=none",
+		"--runtime", runtime,
+		netFlag,
 		"--read-only",
 		"--tmpfs", fmt.Sprintf("/tmp:rw,noexec,nosuid,nodev,size=%dm,nr_inodes=%d", 64, 64*64),
 		"-w", "/workspace",
@@ -578,6 +593,7 @@ func (e *KernelEngine) buildKernelRunArgs(name, sessionID, image string, mounts 
 		"--env", "ISOBOX_KERNEL_OUTPUT_BYTES=" + strconv.FormatInt(e.cfg.OutputBytes, 10),
 		"--env", "PYTHONDONTWRITEBYTECODE=1",
 	}
+	a = append(a, resolvMount...)
 	// Bind the session /workspace (RW) and any /memory volume so the FILESYSTEM
 	// persists across steps alongside the in-memory namespace. Rootfs stays
 	// read-only; every other control is unchanged from a one-shot job.

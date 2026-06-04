@@ -92,10 +92,14 @@ func (s *Server) Router(cfg Config) http.Handler {
 	r.Use(requestLogger)
 	r.Use(corsMiddleware)
 
-	// Embedded playground UI + docs (agent- and machine-readable).
+	// Embedded chatbot UI + docs (agent- and machine-readable).
 	r.Get("/", web.Handler())
 	r.Get("/llms.txt", web.LLMs())
 	r.Get("/openapi.yaml", web.OpenAPI())
+	// Self-hosted flux-md bundle (JS + Web Worker + WASM + CSS) for the chatbot UI.
+	// Served with explicit MIME types (application/wasm, text/javascript) inside the
+	// handler — required for WebAssembly streaming-compile and the module worker.
+	r.Handle("/assets/*", web.Assets())
 
 	// Unauthenticated, cheap endpoints.
 	r.Get("/healthz", s.handleHealthz)

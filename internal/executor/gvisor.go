@@ -63,6 +63,17 @@ func NewGvisor() *Gvisor {
 	}
 }
 
+// NetMode returns the docker runtime, egress network, and resolv.conf mount to
+// use for FILTERED egress, plus whether egress is currently available (fails
+// closed on a stale firewall sentinel). It lets other backends (the kernel
+// engine) build their own docker args with the same egress posture as Execute.
+func (g *Gvisor) NetMode() (runtime, network, resolvConf string, ok bool) {
+	if g.AllowNetwork && g.EgressNetwork != "" && g.egressFirewallFresh() {
+		return g.NetRuntime, g.EgressNetwork, g.ResolvConf, true
+	}
+	return "", "", "", false
+}
+
 // networkEnabled reports whether this spec should get filtered egress. It fails
 // CLOSED: even with network requested and allowed, egress is refused unless the
 // firewall heartbeat sentinel is present and fresh.
@@ -280,8 +291,8 @@ func (g *Gvisor) buildRunArgs(name, jobDir string, s Spec) []string {
 		"--pids-limit", strconv.Itoa(pids),
 		"--cap-drop=ALL",
 		"--security-opt=no-new-privileges",
-		"--user=" + g.User,
-		"--cgroup-parent=" + g.Slice,
+		"--user="+g.User,
+		"--cgroup-parent="+g.Slice,
 		"--hostname=sandbox",
 		"--label", "isobox.managed=true",
 	)

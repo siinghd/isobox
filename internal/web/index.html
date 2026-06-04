@@ -3,201 +3,600 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>isobox — run untrusted code, safely</title>
-<meta name="description" content="Open-source, self-hostable sandbox for running untrusted / AI-generated code. Isolated by gVisor. No KVM required." />
+<title>isobox — AI chat with a code interpreter</title>
+<meta name="description" content="A ChatGPT-style chatbot with a real Python code interpreter, sandboxed by isobox (gVisor). Streams from open models; runs the model's Python in a persistent kernel." />
+<link rel="stylesheet" href="/assets/flux-md.css">
 <style>
   :root{
     --bg:#0b0e14; --panel:#11151f; --panel2:#161b27; --border:#222a3a;
     --fg:#d7dce5; --muted:#8a93a6; --accent:#5db8ff; --accent2:#7c5cff;
-    --ok:#41d39a; --err:#ff6b6b; --warn:#ffd166; --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    --ok:#41d39a; --err:#ff6b6b; --warn:#ffd166;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    --user:#16203a; --asst:#11151f;
   }
   *{box-sizing:border-box}
   html,body{margin:0;height:100%}
-  body{background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+  body{background:var(--bg);color:var(--fg);font:15px/1.6 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;display:flex;flex-direction:column}
   a{color:var(--accent);text-decoration:none}
-  header{display:flex;align-items:center;gap:14px;padding:14px 20px;border-bottom:1px solid var(--border);background:linear-gradient(180deg,#0d1119,#0b0e14)}
-  .logo{font-weight:700;font-size:18px;letter-spacing:.3px}
+  a:hover{text-decoration:underline}
+
+  header{display:flex;align-items:center;gap:12px;padding:11px 18px;border-bottom:1px solid var(--border);background:linear-gradient(180deg,#0d1119,#0b0e14);flex-wrap:wrap}
+  .logo{font-weight:700;font-size:17px;letter-spacing:.3px;white-space:nowrap}
   .logo b{background:linear-gradient(90deg,var(--accent),var(--accent2));-webkit-background-clip:text;background-clip:text;color:transparent}
-  .tag{color:var(--muted);font-size:12.5px}
+  .tag{color:var(--muted);font-size:12.5px;white-space:nowrap}
   header .spacer{flex:1}
-  header .gh{color:var(--muted);font-size:13px}
-  .wrap{display:grid;grid-template-columns:1fr 1fr;gap:0;height:calc(100% - 56px - 30px)}
-  @media(max-width:860px){.wrap{grid-template-columns:1fr;height:auto}}
-  .pane{display:flex;flex-direction:column;min-height:0;border-right:1px solid var(--border)}
-  .pane:last-child{border-right:none}
-  .bar{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--border);background:var(--panel)}
-  select,button,input{font:inherit;color:var(--fg);background:var(--panel2);border:1px solid var(--border);border-radius:8px;padding:7px 11px;outline:none}
-  select:focus,input:focus{border-color:var(--accent)}
-  button.run{background:linear-gradient(90deg,var(--accent),var(--accent2));border:none;color:#06101c;font-weight:700;cursor:pointer;padding:7px 18px}
-  button.run:disabled{opacity:.55;cursor:default}
-  .bar .spacer{flex:1}
-  .hint{color:var(--muted);font-size:12px}
-  .net{display:flex;align-items:center;gap:5px;font-size:12.5px;color:var(--muted);cursor:pointer;user-select:none}
-  .net input{accent-color:var(--accent);cursor:pointer}
-  textarea{flex:1;width:100%;resize:none;border:none;outline:none;background:var(--bg);color:var(--fg);font:13px/1.55 var(--mono);padding:14px;tab-size:4}
-  .stdin{border-top:1px solid var(--border);background:var(--panel)}
-  .stdin summary{cursor:pointer;color:var(--muted);padding:8px 14px;font-size:12.5px;user-select:none}
-  .stdin textarea{height:80px;background:var(--panel2)}
-  #out{flex:1;margin:0;padding:14px;overflow:auto;font:13px/1.5 var(--mono);white-space:pre-wrap;word-break:break-word}
-  #out .e{color:var(--err)}
-  #out .meta{color:var(--muted)}
-  .status{display:flex;gap:8px;align-items:center;padding:9px 14px;border-top:1px solid var(--border);background:var(--panel);min-height:40px;flex-wrap:wrap}
-  .badge{font-size:11.5px;padding:3px 9px;border-radius:999px;border:1px solid var(--border);color:var(--muted)}
+  header select,header button{font:inherit;font-size:13px;color:var(--fg);background:var(--panel2);border:1px solid var(--border);border-radius:8px;padding:6px 10px;outline:none;cursor:pointer}
+  header select:focus{border-color:var(--accent)}
+  header select{max-width:230px}
+  .btn-ghost{transition:border-color .15s,color .15s}
+  .btn-ghost:hover{border-color:var(--accent);color:var(--fg)}
+  .btn-ghost:disabled{opacity:.45;cursor:default}
+  .gh{color:var(--muted);font-size:13px;white-space:nowrap}
+
+  /* kernel status pill */
+  .kstat{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);border:1px solid var(--border);border-radius:999px;padding:4px 11px;white-space:nowrap}
+  .kdot{width:7px;height:7px;border-radius:50%;background:var(--muted);box-shadow:0 0 0 transparent;transition:background .2s,box-shadow .2s}
+  .kstat.live .kdot{background:var(--ok);box-shadow:0 0 8px var(--ok)}
+  .kstat.busy .kdot{background:var(--accent);box-shadow:0 0 8px var(--accent);animation:pulse 1s infinite}
+  .kstat.err .kdot{background:var(--err);box-shadow:0 0 8px var(--err)}
+  @keyframes pulse{50%{opacity:.35}}
+
+  main{flex:1;min-height:0;overflow-y:auto;scroll-behavior:smooth}
+  .thread{max-width:860px;margin:0 auto;padding:26px 18px 8px}
+
+  .msg{display:flex;gap:13px;padding:14px 0;align-items:flex-start}
+  .avatar{flex:none;width:30px;height:30px;border-radius:8px;display:grid;place-items:center;font-size:13px;font-weight:700;margin-top:2px}
+  .msg.user .avatar{background:var(--user);color:var(--accent);border:1px solid var(--border)}
+  .msg.assistant .avatar{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#06101c}
+  .bubble{flex:1;min-width:0}
+  .role{font-size:12px;color:var(--muted);margin-bottom:3px;font-weight:600;letter-spacing:.2px}
+  .msg.user .content{white-space:pre-wrap;word-break:break-word}
+
+  /* flux-md renders into light DOM; theme its output here */
+  flux-markdown{display:block;min-width:0}
+  .content :first-child{margin-top:0}
+  .content :last-child{margin-bottom:0}
+  .content p{margin:.55em 0}
+  .content h1,.content h2,.content h3,.content h4{margin:.9em 0 .4em;line-height:1.3}
+  .content h1{font-size:1.45em}.content h2{font-size:1.28em}.content h3{font-size:1.13em}
+  .content a{color:var(--accent)}
+  .content code{font-family:var(--mono);font-size:.88em;background:var(--panel2);border:1px solid var(--border);border-radius:5px;padding:1px 5px}
+  .content pre{background:#0a0d14;border:1px solid var(--border);border-radius:10px;padding:13px 15px;overflow:auto;margin:.6em 0}
+  .content pre code{background:none;border:none;padding:0;font-size:.86em;line-height:1.5}
+  .content table{border-collapse:collapse;margin:.6em 0;display:block;overflow:auto}
+  .content th,.content td{border:1px solid var(--border);padding:6px 11px;text-align:left}
+  .content th{background:var(--panel2)}
+  .content blockquote{margin:.6em 0;padding:.1em 14px;border-left:3px solid var(--border);color:var(--muted)}
+  .content ul,.content ol{padding-left:1.5em;margin:.5em 0}
+  .content hr{border:none;border-top:1px solid var(--border);margin:1em 0}
+  .content img{max-width:100%}
+
+  .cursor::after{content:'▌';color:var(--accent);animation:blink 1s step-end infinite;margin-left:1px}
+  @keyframes blink{50%{opacity:0}}
+
+  /* code-interpreter run cards */
+  .ci{margin:11px 0;border:1px solid var(--border);border-radius:11px;overflow:hidden;background:var(--panel)}
+  .ci-head{display:flex;align-items:center;gap:8px;padding:8px 13px;background:var(--panel2);border-bottom:1px solid var(--border);font-size:12.5px;color:var(--muted)}
+  .ci-head .lang{color:var(--accent);font-weight:600;font-family:var(--mono)}
+  .ci-head .spacer{flex:1}
+  .ci-head .meta{font-family:var(--mono);font-size:11.5px}
+  .ci-code{margin:0;padding:12px 14px;overflow:auto;font:12.5px/1.5 var(--mono);white-space:pre;background:#0a0d14;color:#cfd6e4}
+  .ci-out{margin:0;padding:11px 14px;border-top:1px solid var(--border);overflow:auto;font:12.5px/1.5 var(--mono);white-space:pre-wrap;word-break:break-word;max-height:340px}
+  .ci-out .label{display:block;font-family:system-ui,sans-serif;font-size:11px;color:var(--muted);letter-spacing:.4px;text-transform:uppercase;margin:0 0 4px}
+  .ci-out .label.err{color:var(--err)}
+  .ci-out .stderr{color:var(--err)}
+  .ci-out.running{color:var(--accent)}
+  .ci-badges{display:flex;gap:6px;flex-wrap:wrap}
+  .badge{font-size:11px;padding:2px 8px;border-radius:999px;border:1px solid var(--border);color:var(--muted);font-family:var(--mono)}
   .badge.ok{color:var(--ok);border-color:#1c5b45}
   .badge.err{color:var(--err);border-color:#5b1f1f}
   .badge.warn{color:var(--warn);border-color:#5b4a1c}
-  .badge.live{color:var(--accent)}
-  footer{height:30px;display:flex;align-items:center;gap:16px;padding:0 20px;border-top:1px solid var(--border);color:var(--muted);font-size:12px;background:var(--panel)}
-  .dot{width:7px;height:7px;border-radius:50%;background:var(--ok);display:inline-block;margin-right:6px;box-shadow:0 0 8px var(--ok)}
-  kbd{font:11px var(--mono);background:var(--panel2);border:1px solid var(--border);border-bottom-width:2px;border-radius:5px;padding:1px 5px}
+
+  .sys-note{max-width:860px;margin:6px auto;padding:9px 14px;color:var(--warn);font-size:13px;border:1px solid #5b4a1c;border-radius:10px;background:rgba(255,209,102,.06)}
+  .sys-note.err{color:var(--err);border-color:#5b1f1f;background:rgba(255,107,107,.06)}
+
+  .welcome{max-width:720px;margin:7vh auto 0;text-align:center;padding:0 18px}
+  .welcome h2{font-size:24px;margin:0 0 8px;background:linear-gradient(90deg,var(--accent),var(--accent2));-webkit-background-clip:text;background-clip:text;color:transparent}
+  .welcome p{color:var(--muted);margin:0 0 22px}
+  .chips{display:flex;gap:10px;flex-wrap:wrap;justify-content:center}
+  .chip{border:1px solid var(--border);background:var(--panel);border-radius:11px;padding:11px 14px;text-align:left;cursor:pointer;font-size:13px;color:var(--fg);transition:border-color .15s,transform .1s;max-width:235px}
+  .chip:hover{border-color:var(--accent);transform:translateY(-1px)}
+  .chip b{display:block;color:var(--accent);font-size:12px;margin-bottom:2px}
+
+  /* composer */
+  .composer-wrap{border-top:1px solid var(--border);background:linear-gradient(180deg,#0b0e14,#0d1119)}
+  .composer{max-width:860px;margin:0 auto;padding:13px 18px 16px}
+  .inputrow{display:flex;align-items:flex-end;gap:10px;background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:8px 8px 8px 14px;transition:border-color .15s}
+  .inputrow:focus-within{border-color:var(--accent)}
+  #prompt{flex:1;resize:none;border:none;outline:none;background:none;color:var(--fg);font:15px/1.5 inherit;max-height:200px;padding:6px 0}
+  .send{flex:none;width:38px;height:38px;border-radius:10px;border:none;cursor:pointer;display:grid;place-items:center;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#06101c;font-size:17px;transition:opacity .15s}
+  .send:disabled{opacity:.4;cursor:default}
+  .send.stop{background:var(--err);color:#1a0606}
+  .foot{display:flex;align-items:center;gap:8px;justify-content:center;margin-top:9px;color:var(--muted);font-size:11.5px;flex-wrap:wrap}
+  .foot kbd{font:11px var(--mono);background:var(--panel2);border:1px solid var(--border);border-bottom-width:2px;border-radius:5px;padding:1px 5px}
+  .dot{width:6px;height:6px;border-radius:50%;background:var(--ok);display:inline-block;box-shadow:0 0 7px var(--ok)}
 </style>
 </head>
 <body>
 <header>
-  <div class="logo"><b>isobox</b></div>
-  <div class="tag">run untrusted code, safely — isolated by gVisor</div>
+  <div class="logo"><b>isobox</b> chat</div>
+  <div class="tag">model writes Python → runs in a sandboxed kernel</div>
   <div class="spacer"></div>
+  <span class="kstat" id="kstat"><span class="kdot"></span><span id="kstat-text">kernel idle</span></span>
+  <select id="model" title="model"></select>
+  <button class="btn-ghost" id="reset" title="Reset kernel + clear conversation">Reset</button>
   <a class="gh" href="https://github.com/siinghd/isobox" target="_blank" rel="noopener">★ GitHub</a>
 </header>
 
-<div class="wrap">
-  <section class="pane">
-    <div class="bar">
-      <select id="lang" title="language"></select>
-      <select id="example" title="examples"><option value="">examples…</option></select>
-      <div class="spacer"></div>
-      <label class="net" title="Allow filtered internet egress (public only — metadata/private/host are firewalled)"><input type="checkbox" id="network"> 🌐 net</label>
-      <span class="hint"><kbd>Ctrl</kbd>+<kbd>Enter</kbd></span>
-      <button class="run" id="run">Run ▸</button>
+<main id="main">
+  <div class="thread" id="thread">
+    <div class="welcome" id="welcome">
+      <h2>Chat with a code interpreter</h2>
+      <p>Ask anything. When the model writes a Python block, it auto-runs in a persistent isobox kernel — variables and imports carry across the whole conversation. It has <code>requests</code>, <code>httpx</code>, <code>bs4</code>, <code>pandas</code>, <code>numpy</code>, and live internet.</p>
+      <div class="chips" id="chips"></div>
     </div>
-    <textarea id="code" spellcheck="false" placeholder="// write code, hit Run"></textarea>
-    <details class="stdin">
-      <summary>stdin (optional)</summary>
-      <textarea id="stdin" spellcheck="false" placeholder="fed to the program's standard input"></textarea>
-    </details>
-  </section>
+  </div>
+</main>
 
-  <section class="pane">
-    <div class="bar"><span class="hint">output</span><div class="spacer"></div><span class="hint" id="backend"></span></div>
-    <pre id="out"><span class="meta">Output appears here. Code runs in a gVisor sandbox: no network, read-only filesystem, memory/CPU/time capped, then destroyed.</span></pre>
-    <div class="status" id="status"></div>
-  </section>
+<div class="composer-wrap">
+  <div class="composer">
+    <div class="inputrow">
+      <textarea id="prompt" rows="1" placeholder="Message the model…  (it can run Python to compute, fetch, scrape, analyze)" spellcheck="false"></textarea>
+      <button class="send" id="send" title="Send">▲</button>
+    </div>
+    <div class="foot">
+      <span><span class="dot"></span>sandboxed by gVisor</span>
+      <span>·</span>
+      <span><kbd>Enter</kbd> send · <kbd>Shift</kbd>+<kbd>Enter</kbd> newline</span>
+      <span>·</span>
+      <span>code interpreter loops up to 5×/turn</span>
+    </div>
+  </div>
 </div>
 
-<footer>
-  <span><span class="dot"></span>gVisor systrap • network off • ephemeral</span>
-  <span>·</span>
-  <span>Apache-2.0</span>
-  <span>·</span>
-  <span>self-host: <a href="https://github.com/siinghd/isobox" target="_blank" rel="noopener">one binary</a></span>
-</footer>
+<script type="module">
+import "/assets/flux-md.js"; // import alone registers the <flux-markdown> custom element
 
-<script>
+/* ─────────────────────────────  config  ───────────────────────────── */
+const AI_BASE = "https://ai.hsingh.app";          // OpenAI-compatible, wildcard CORS, no key
+const ISOBOX  = "";                                // same-origin: /v1/sessions, /v1/sessions/{id}/exec
+const PREFERRED_MODELS = [                          // first one present wins as the default
+  "openai/gpt-oss-120b:free",
+  "qwen/qwen3-coder:free",
+  "qwen/qwen3-next-80b-a3b-instruct:free",
+  "meta-llama/llama-3.3-70b-instruct:free",
+];
+const MAX_TOOL_ITERS = 5;     // model completions per user turn (agentic loop cap)
+const KERNEL_WALL_MS = 20000; // per-exec wall time
+
+const SYSTEM_PROMPT = `You are a helpful AI assistant with a built-in **Python code interpreter** running in a secure isobox sandbox (gVisor).
+
+Tools and capabilities:
+- To run Python, write a fenced code block with the language tag \`python\`. It executes automatically and the captured stdout/stderr is returned to you; then you continue.
+- The kernel is PERSISTENT across the whole conversation: variables, imports, and function definitions you define in one block are available in later blocks and later turns.
+- The kernel has internet access. Pre-installed: requests, httpx, bs4 (BeautifulSoup), lxml, pandas, numpy. You may pip-install more only if truly needed.
+- Use the interpreter for anything computational: math, data wrangling, fetching/scraping live data, parsing, simulations, verifying your own answers.
+
+Rules:
+- Only \`python\` code blocks run. Put runnable code in a single block; \`print()\` whatever you want to see (the kernel does NOT auto-echo the last expression — print explicitly).
+- After you see the execution output, interpret it for the user in plain language. Do not just dump raw output.
+- If code errors, read the traceback and fix it in a new block.
+- Keep individual code steps fast (a step that blocks past ~20s is killed). Do not write infinite loops or long sleeps.
+- When no computation is needed, just answer directly in Markdown — do not run code gratuitously.`;
+
+const STARTERS = [
+  { t:"Live data", q:"Fetch the current price of Bitcoin in USD from a public API and tell me the value." },
+  { t:"Math + verify", q:"What's the 50th Fibonacci number? Compute it with code and show the result." },
+  { t:"Data analysis", q:"Load the iris dataset from https://raw.githubusercontent.com/mwaskom/seaborn-data/master/iris.csv and show the mean sepal length per species." },
+  { t:"Scrape", q:"Scrape the top 5 story titles from Hacker News and list them." },
+];
+
+/* ─────────────────────────────  state  ───────────────────────────── */
+const messages = [{ role:"system", content: SYSTEM_PROMPT }]; // full chat history sent to the model
+let kernel = null;        // { id, token } once lazily created
+let kernelDisabled = false;
+let abortCtl = null;      // AbortController for the in-flight LLM fetch
+let stopRequested = false;
+let busy = false;
+
+/* ─────────────────────────────  dom  ───────────────────────────── */
 const $ = s => document.querySelector(s);
-const out = $('#out'), statusEl = $('#status');
+const thread = $("#thread"), main = $("#main"), welcome = $("#welcome");
+const modelSel = $("#model"), promptEl = $("#prompt"), sendBtn = $("#send");
+const kstat = $("#kstat"), kstatText = $("#kstat-text");
 
-// Values are a string, or {code, net:true} to auto-enable filtered egress.
-const EXAMPLES = {
-  python: {
-    "hello": `print("hello from isobox")\nprint(sum(range(100)))`,
-    "🌐 fetch JSON API": { net: true, code: `import requests\nr = requests.get("https://api.github.com/repos/google/gvisor", timeout=8)\nd = r.json()\nprint("gvisor:", d["stargazers_count"], "stars,", d["forks"], "forks")` },
-    "🌐 scrape HTML (BeautifulSoup)": { net: true, code: `import requests\nfrom bs4 import BeautifulSoup\nhtml = requests.get("https://news.ycombinator.com", timeout=8).text\nsoup = BeautifulSoup(html, "lxml")\nfor a in soup.select("span.titleline > a")[:5]:\n    print("-", a.text)` },
-    "🌐 analyze data (pandas)": { net: true, code: `import requests, io, pandas as pd\ncsv = requests.get("https://raw.githubusercontent.com/mwaskom/seaborn-data/master/iris.csv", timeout=8).text\ndf = pd.read_csv(io.StringIO(csv))\nprint(df.groupby("species")["sepal_length"].mean().round(2).to_string())` },
-    "🌐 concurrent fetch (httpx)": { net: true, code: `import httpx, asyncio\nURLS = ["https://example.com", "https://httpbin.org/uuid", "https://api.github.com"]\nasync def main():\n    async with httpx.AsyncClient(timeout=8) as c:\n        rs = await asyncio.gather(*[c.get(u) for u in URLS])\n        for u, r in zip(URLS, rs): print(r.status_code, u)\nasyncio.run(main())` },
-    "escape? (filesystem)": `open("/etc/passwd","a").write("x")  # read-only rootfs`,
-    "killed (wall-time)": `import time\nprint("working...", flush=True)\ntime.sleep(60)  # killed at the cap`,
-  },
-  javascript: {
-    "hello": `console.log("hello from isobox");\nconsole.log([1,2,3,4].reduce((a,b)=>a+b));`,
-    "🌐 fetch JSON": { net: true, code: `const r = await fetch("https://api.github.com/repos/nodejs/node");\nconst d = await r.json();\nconsole.log("node:", d.stargazers_count, "stars");` },
-  },
-  typescript: {
-    "hello": `const greet = (name: string): string => \`hello \${name}\`;\nconsole.log(greet("isobox"));`,
-    "🌐 typed fetch": { net: true, code: `type Repo = { stargazers_count: number };\nconst r = await fetch("https://api.github.com/repos/microsoft/TypeScript");\nconst d = (await r.json()) as Repo;\nconsole.log("TS stars:", d.stargazers_count);` },
-  },
-  ruby: {
-    "hello": `puts "hello from isobox"\nputs (1..100).sum`,
-    "🌐 fetch": { net: true, code: `require "net/http"\nputs Net::HTTP.get(URI("https://api.github.com/repos/ruby/ruby")).length, "bytes fetched"` },
-  },
-  go: {
-    "hello (compiles)": `package main\nimport "fmt"\nfunc main() {\n    fmt.Println("hello from isobox")\n}`,
-    "🌐 fetch": { net: true, code: `package main\nimport ("fmt";"net/http";"io")\nfunc main() {\n    r, _ := http.Get("https://api.github.com/repos/golang/go")\n    b, _ := io.ReadAll(r.Body)\n    fmt.Println(len(b), "bytes")\n}` },
-  },
-  rust: {
-    "hello (compiles)": `fn main() {\n    let sum: i32 = (1..=100).sum();\n    println!("hello from isobox, sum={sum}");\n}`,
-  },
-};
-const exCode = v => (v && typeof v === "object") ? v.code : v;
-const exNet  = v => !!(v && typeof v === "object" && v.net);
+function scrollDown(){ main.scrollTop = main.scrollHeight; }
+function setKernel(state, text){ kstat.className = "kstat " + (state||""); kstatText.textContent = text; }
 
-async function loadRuntimes(){
+/* ─────────────────────────────  model picker  ───────────────────────────── */
+async function loadModels(){
+  modelSel.innerHTML = "";
+  const add = (id,label)=>{ const o=document.createElement("option"); o.value=id; o.textContent=label||id; modelSel.appendChild(o); };
+  add("auto","auto (auto-route)");
   try{
-    const r = await fetch('/runtimes'); const langs = await r.json();
-    const sel = $('#lang'); sel.innerHTML='';
-    langs.forEach(l=>{ const o=document.createElement('option'); o.value=l.language; o.textContent=`${l.language} ${l.version}`; sel.appendChild(o); });
-    $('#backend').textContent = langs[0] ? `backend: ${langs[0].backend}` : '';
-    syncExamples();
-  }catch(e){ $('#backend').textContent='offline'; }
+    const r = await fetch(AI_BASE + "/v1/models");
+    const j = await r.json();
+    const ids = (j.data||[]).map(m=>m.id).filter(id => typeof id==="string" && id.endsWith(":free")).sort();
+    for(const id of ids) add(id);
+    // default: first preferred id that actually exists, else auto
+    const def = PREFERRED_MODELS.find(p => ids.includes(p));
+    modelSel.value = def || "auto";
+  }catch(e){
+    // keep auto + the preferred list as a fallback so the picker is never empty
+    for(const id of PREFERRED_MODELS) add(id);
+    modelSel.value = "auto";
+  }
 }
-function syncExamples(){
-  const lang=$('#lang').value, ex=EXAMPLES[lang]||{}, sel=$('#example');
-  sel.innerHTML='<option value="">examples…</option>';
-  Object.keys(ex).forEach(k=>{ const o=document.createElement('option'); o.value=k; o.textContent=k; sel.appendChild(o); });
-  if(!$('#code').value && ex.hello) $('#code').value = exCode(ex.hello);
+
+/* ─────────────────────────────  rendering helpers  ───────────────────────────── */
+function el(tag, cls, text){ const e=document.createElement(tag); if(cls)e.className=cls; if(text!=null)e.textContent=text; return e; }
+
+function addUserMsg(text){
+  if(welcome) welcome.style.display="none";
+  const m = el("div","msg user");
+  m.appendChild(el("div","avatar","you"));
+  const b = el("div","bubble");
+  b.appendChild(el("div","role","You"));
+  b.appendChild(el("div","content", text)); // textContent — never innerHTML of user input
+  m.appendChild(b);
+  thread.appendChild(m);
+  scrollDown();
 }
-$('#lang').addEventListener('change', syncExamples);
-$('#example').addEventListener('change', e=>{
-  const v=(EXAMPLES[$('#lang').value]||{})[e.target.value];
-  if(v!=null){ $('#code').value=exCode(v); $('#network').checked=exNet(v); }
-});
 
-$('#code').addEventListener('keydown', e=>{
-  if(e.key==='Tab'){ e.preventDefault(); const t=e.target,s=t.selectionStart; t.value=t.value.slice(0,s)+'    '+t.value.slice(t.selectionEnd); t.selectionStart=t.selectionEnd=s+4; }
-  if((e.ctrlKey||e.metaKey)&&e.key==='Enter') run();
-});
+// Create an assistant bubble; returns { content, md } where md is a live <flux-markdown>.
+function addAssistantBubble(){
+  const m = el("div","msg assistant");
+  m.appendChild(el("div","avatar","AI"));
+  const b = el("div","bubble");
+  b.appendChild(el("div","role","Assistant"));
+  const content = el("div","content");
+  b.appendChild(content);
+  m.appendChild(b);
+  thread.appendChild(m);
+  const md = document.createElement("flux-markdown");
+  content.appendChild(md);              // MUST be connected before append()/finalize()
+  content.classList.add("cursor");
+  scrollDown();
+  return { content, md };
+}
 
-function badge(text,cls){ const b=document.createElement('span'); b.className='badge '+(cls||''); b.textContent=text; statusEl.appendChild(b); }
-function append(text,cls){ const s=document.createElement('span'); if(cls)s.className=cls; s.textContent=text; out.appendChild(s); out.scrollTop=out.scrollHeight; }
+function sysNote(text, isErr){
+  if(welcome) welcome.style.display="none";
+  const n = el("div","sys-note"+(isErr?" err":""), text);
+  thread.appendChild(n); scrollDown();
+}
 
-let running=false;
-async function run(){
-  if(running) return; running=true;
-  $('#run').disabled=true; out.textContent=''; statusEl.innerHTML=''; badge('running…','live');
-  const body = JSON.stringify({ language:$('#lang').value, code:$('#code').value, stdin:$('#stdin').value, network:$('#network').checked });
-  const t0=performance.now();
-  try{
-    const r = await fetch('/execute',{method:'POST',headers:{'Content-Type':'application/json','Accept':'text/event-stream'},body});
-    if(r.status===429){ statusEl.innerHTML=''; badge('rate limited / at capacity','warn'); badge('retry in a moment','meta'); return; }
-    if(!r.body){ const j=await r.json(); renderDone(j); return; }
-    const reader=r.body.getReader(), dec=new TextDecoder(); let buf='';
-    for(;;){
-      const {value,done}=await reader.read(); if(done) break;
-      buf+=dec.decode(value,{stream:true});
-      let idx;
-      while((idx=buf.indexOf('\n\n'))>=0){
-        const raw=buf.slice(0,idx); buf=buf.slice(idx+2);
-        const ev=/event: (\w+)/.exec(raw), dt=/data: (.*)/s.exec(raw);
-        if(!ev||!dt) continue;
-        const payload=JSON.parse(dt[1]);
-        if(ev[1]==='stdout') append(payload.chunk);
-        else if(ev[1]==='stderr') append(payload.chunk,'e');
-        else if(ev[1]==='done') renderDone(payload);
-        else if(ev[1]==='error'){ statusEl.innerHTML=''; badge('error','err'); append('\n'+payload.error,'e'); }
+/* ─────────────────────────────  LLM streaming  ─────────────────────────────
+   Streams an assistant completion. Feeds each delta into the flux-markdown
+   element (live render) AND accumulates the full text in a JS string (needed
+   to extract python code blocks afterwards). Returns the full text, or throws
+   on network/abort. */
+async function streamCompletion(bubble){
+  abortCtl = new AbortController();
+  const body = {
+    model: modelSel.value || "auto",
+    messages: messages.map(m => ({ role: m.role, content: m.content })),
+    stream: true,
+    temperature: 0.4,
+  };
+  const r = await fetch(AI_BASE + "/v1/chat/completions", {
+    method:"POST",
+    headers:{ "Content-Type":"application/json" },
+    body: JSON.stringify(body),
+    signal: abortCtl.signal,
+  });
+  if(!r.ok){
+    let detail = "";
+    try{ detail = JSON.stringify(await r.json()); }catch(_){ detail = r.statusText; }
+    throw new Error("model error " + r.status + ": " + detail);
+  }
+  if(!r.body) throw new Error("model returned no stream");
+
+  const reader = r.body.getReader(), dec = new TextDecoder();
+  let buf = "", full = "";
+  for(;;){
+    const { value, done } = await reader.read();
+    if(done) break;
+    buf += dec.decode(value, { stream:true });
+    let nl;
+    while((nl = buf.indexOf("\n")) >= 0){
+      let line = buf.slice(0, nl); buf = buf.slice(nl+1);
+      line = line.replace(/\r$/, "").trim();
+      if(!line || !line.startsWith("data:")) continue;
+      const data = line.slice(5).trim();
+      if(data === "[DONE]") continue;
+      let j; try{ j = JSON.parse(data); }catch(_){ continue; }
+      const piece = j.choices && j.choices[0] && j.choices[0].delta && j.choices[0].delta.content;
+      if(piece){
+        full += piece;
+        bubble.md.append(piece);   // incremental delta only
+        scrollDown();
       }
     }
-  }catch(e){ statusEl.innerHTML=''; badge('request failed','err'); append('\n'+e.message,'e'); }
-  finally{ running=false; $('#run').disabled=false; }
+  }
+  bubble.md.finalize();
+  bubble.content.classList.remove("cursor");
+  return full;
 }
-function renderDone(p){
-  const run=p.run||p; statusEl.innerHTML='';
-  badge('exit '+run.exitCode, run.exitCode===0?'ok':'err');
-  if(run.timedOut) badge('⏱ timed out','warn');
-  if(run.oomKilled) badge('⊘ out of memory','warn');
-  if(run.truncated) badge('output truncated','meta');
-  badge(run.durationMs+' ms','meta');
+
+/* ─────────────────────────────  code-block extraction  ───────────────────────────── */
+// Pull fenced ```python blocks (also "py") out of assistant markdown, in order.
+function extractPythonBlocks(md){
+  const re = /```[ \t]*(python|py)[ \t]*\r?\n([\s\S]*?)```/gi;
+  const blocks = []; let m;
+  while((m = re.exec(md)) !== null){
+    const code = m[2].replace(/\s+$/,"");
+    if(code.trim()) blocks.push(code);
+  }
+  return blocks;
 }
-$('#run').addEventListener('click', run);
-loadRuntimes();
+
+/* ─────────────────────────────  kernel session  ───────────────────────────── */
+async function ensureKernel(){
+  if(kernel) return kernel;
+  setKernel("busy","starting kernel…");
+  const r = await fetch(ISOBOX + "/v1/sessions", {
+    method:"POST",
+    headers:{ "Content-Type":"application/json" },
+    body: JSON.stringify({ runtime:"python", type:"kernel", network:true }),
+  });
+  if(!r.ok){
+    let j={}; try{ j=await r.json(); }catch(_){}
+    if(j.error === "kernel_disabled"){ kernelDisabled = true; setKernel("err","kernel unavailable"); throw new Error("kernel_disabled"); }
+    setKernel("err","kernel error"); throw new Error("kernel start failed ("+r.status+"): "+(j.detail||j.error||r.statusText));
+  }
+  const j = await r.json();
+  kernel = { id:j.id, token:j.token };
+  setKernel("live","kernel live");
+  return kernel;
+}
+
+function isDeadKernelResp(status, j){
+  if(status >= 200 && status < 300) return false;
+  const e = (j && (j.error||"")) + " " + (j && (j.detail||""));
+  // A kernel container that has crashed/been-killed surfaces in several ways:
+  //  - the session is gone entirely: session_not_found / not_found (404)
+  //  - the kernel was already marked dead: "kernel is dead" (500)
+  //  - the FIRST step after death fails on the stdin/stdout pipe to the gone
+  //    container: "write step: ... broken pipe" or "kernel stream closed
+  //    mid-step" (500, error:"internal"). This first error does NOT contain the
+  //    word "dead", so it must be matched explicitly or recreate never fires on
+  //    the common case (kernel dies, next code block is the first to hit it).
+  return /session_not_found|not_found|kernel[_ ]?(is )?dead|broken pipe|stream closed|write step|EOF/i.test(e);
+}
+
+// Run one code step in the kernel; recreates the kernel once on a dead-kernel error.
+// Returns { stdout, stderr, exitCode, timedOut, oomKilled, durationMs } or throws.
+async function runInKernel(code, allowRecreate=true){
+  await ensureKernel();
+  setKernel("busy","running code…");
+  const r = await fetch(ISOBOX + "/v1/sessions/" + kernel.id + "/exec", {
+    method:"POST",
+    headers:{ "Content-Type":"application/json", "X-Session-Token": kernel.token },
+    body: JSON.stringify({ code, network:true, limits:{ wallTimeMs: KERNEL_WALL_MS } }),
+  });
+  let j={}; try{ j = await r.json(); }catch(_){}
+  if(!r.ok){
+    if(allowRecreate && isDeadKernelResp(r.status, j)){
+      kernel = null;                    // drop the dead handle
+      setKernel("busy","restarting kernel…");
+      return await runInKernel(code, false);  // recreate + retry once
+    }
+    setKernel("err","kernel error");
+    throw new Error((j.error||"exec failed")+(j.detail?": "+j.detail:" ("+r.status+")"));
+  }
+  setKernel("live","kernel live");
+  return j.run || {};
+}
+
+/* ─────────────────────────────  code-interpreter run card  ───────────────────────────── */
+function addRunCard(code){
+  const card = el("div","ci");
+  const head = el("div","ci-head");
+  head.appendChild(el("span","lang","python"));
+  head.appendChild(el("span",null,"code interpreter"));
+  head.appendChild(el("span","spacer"));
+  const badges = el("div","ci-badges"); head.appendChild(badges);
+  card.appendChild(head);
+  const pre = el("pre","ci-code"); pre.appendChild(el("code",null,code)); card.appendChild(pre);
+  const out = el("pre","ci-out running","running…");
+  card.appendChild(out);
+  thread.appendChild(card); scrollDown();
+  return { card, out, badges };
+}
+
+function fillRunCard(ui, run){
+  ui.out.classList.remove("running");
+  ui.out.textContent = "";
+  const stdout = (run.stdout||""), stderr = (run.stderr||"");
+  if(stdout){
+    ui.out.appendChild(el("span","label","stdout"));
+    ui.out.appendChild(document.createTextNode(stdout));
+  }
+  if(stderr){
+    if(stdout) ui.out.appendChild(document.createTextNode("\n"));
+    ui.out.appendChild(el("span","label err","stderr"));
+    const s = el("span","stderr"); s.textContent = stderr; ui.out.appendChild(s);
+  }
+  if(!stdout && !stderr) ui.out.appendChild(el("span","label","(no output)"));
+  // badges
+  ui.badges.appendChild(el("span","badge "+(run.exitCode===0?"ok":"err"), "exit "+(run.exitCode??"?")));
+  if(run.timedOut) ui.badges.appendChild(el("span","badge warn","⏱ timed out"));
+  if(run.oomKilled) ui.badges.appendChild(el("span","badge warn","⊘ OOM"));
+  if(run.durationMs!=null) ui.badges.appendChild(el("span","badge", run.durationMs+" ms"));
+  scrollDown();
+}
+
+// Format a run result as a markdown-ish tool message fed back to the model.
+function runToToolText(run){
+  const parts = [];
+  const so = (run.stdout||"").trimEnd(), se = (run.stderr||"").trimEnd();
+  parts.push("[code interpreter result]");
+  parts.push("exit code: " + (run.exitCode??"?") + (run.timedOut?" (TIMED OUT at wall-time limit)":"") + (run.oomKilled?" (OUT OF MEMORY)":""));
+  parts.push("stdout:\n" + (so || "(empty)"));
+  if(se) parts.push("stderr:\n" + se);
+  let t = parts.join("\n");
+  if(t.length > 12000) t = t.slice(0,12000) + "\n…(output truncated)";
+  return t;
+}
+
+/* ─────────────────────────────  main turn / agentic loop  ───────────────────────────── */
+async function sendTurn(userText){
+  if(busy) return;
+  busy = true; stopRequested = false;
+  setSendMode("stop");
+  messages.push({ role:"user", content:userText });
+  addUserMsg(userText);
+
+  try{
+    for(let iter=0; iter<MAX_TOOL_ITERS; iter++){
+      if(stopRequested) break;
+
+      // 1) stream a completion
+      const bubble = addAssistantBubble();
+      let full;
+      try{
+        full = await streamCompletion(bubble);
+      }catch(e){
+        bubble.content.classList.remove("cursor");
+        if(e.name === "AbortError"){ bubble.md.finalize(); break; }
+        bubble.md.finalize();
+        sysNote("Model error: " + e.message, true);
+        break;
+      }
+      messages.push({ role:"assistant", content: full });
+
+      if(stopRequested) break;
+
+      // 2) extract + run python blocks
+      const blocks = extractPythonBlocks(full);
+      if(blocks.length === 0) break;            // no code → turn is done
+
+      if(kernelDisabled){
+        sysNote("The model wrote Python, but this isobox backend has no kernel runtime available (kernel sessions are disabled). Showing the code only.", true);
+        break;
+      }
+
+      let hadError = false, ranAny = false;
+      const outChunks = [];
+      for(const code of blocks){
+        if(stopRequested) break;
+        const ui = addRunCard(code);
+        let run;
+        try{
+          run = await runInKernel(code);
+        }catch(e){
+          ui.out.classList.remove("running");
+          ui.out.textContent = "";
+          ui.out.appendChild(el("span","label err","error"));
+          const s = el("span","stderr"); s.textContent = e.message; ui.out.appendChild(s);
+          outChunks.push("[code interpreter result]\nThe interpreter could not run this block: " + e.message);
+          hadError = true; ranAny = true;
+          continue;
+        }
+        fillRunCard(ui, run);
+        outChunks.push(runToToolText(run));
+        ranAny = true;
+        if((run.exitCode && run.exitCode!==0) || run.timedOut || run.oomKilled || (run.stderr||"").trim()) hadError = true;
+      }
+
+      if(!ranAny || stopRequested) break;
+
+      // 3) feed the captured output back to the model as a user message, then loop.
+      messages.push({ role:"user", content: outChunks.join("\n\n---\n\n") });
+
+      if(iter === MAX_TOOL_ITERS - 1){
+        sysNote("Reached the code-interpreter iteration cap ("+MAX_TOOL_ITERS+") for this turn.", false);
+      }
+      // continue loop → model gets to react to the output
+    }
+  } finally {
+    busy = false; abortCtl = null;
+    setSendMode("send");
+    if(kernel) setKernel("live","kernel live");
+    else if(!kernelDisabled) setKernel("","kernel idle");
+    promptEl.focus();
+  }
+}
+
+/* ─────────────────────────────  send / stop button  ───────────────────────────── */
+function setSendMode(mode){
+  if(mode === "stop"){
+    sendBtn.classList.add("stop");
+    sendBtn.textContent = "■";
+    sendBtn.title = "Stop";
+    sendBtn.disabled = false;
+  } else {
+    sendBtn.classList.remove("stop");
+    sendBtn.textContent = "▲";
+    sendBtn.title = "Send";
+    sendBtn.disabled = false;
+  }
+}
+
+function onSendClick(){
+  if(busy){ // acts as STOP
+    stopRequested = true;
+    if(abortCtl){ try{ abortCtl.abort(); }catch(_){} }
+    return;
+  }
+  const text = promptEl.value.trim();
+  if(!text) return;
+  promptEl.value = ""; autosize();
+  sendTurn(text);
+}
+
+/* ─────────────────────────────  reset  ───────────────────────────── */
+async function reset(){
+  stopRequested = true;
+  if(abortCtl){ try{ abortCtl.abort(); }catch(_){} }
+  // delete the kernel server-side (best effort)
+  if(kernel){
+    const k = kernel; kernel = null;
+    setKernel("busy","deleting kernel…");
+    try{
+      await fetch(ISOBOX + "/v1/sessions/" + k.id, {
+        method:"DELETE",
+        headers:{ "X-Session-Token": k.token },
+      });
+    }catch(_){}
+  }
+  kernelDisabled = false;
+  // clear chat history (keep system prompt) + UI
+  messages.length = 0;
+  messages.push({ role:"system", content: SYSTEM_PROMPT });
+  thread.innerHTML = "";
+  thread.appendChild(welcome);
+  welcome.style.display = "";
+  busy = false; abortCtl = null;
+  setSendMode("send");
+  setKernel("","kernel idle");
+  promptEl.focus();
+}
+
+/* ─────────────────────────────  composer ergonomics  ───────────────────────────── */
+function autosize(){ promptEl.style.height="auto"; promptEl.style.height=Math.min(promptEl.scrollHeight,200)+"px"; }
+promptEl.addEventListener("input", autosize);
+promptEl.addEventListener("keydown", e=>{
+  if(e.key==="Enter" && !e.shiftKey){ e.preventDefault(); onSendClick(); }
+});
+sendBtn.addEventListener("click", onSendClick);
+$("#reset").addEventListener("click", reset);
+
+/* starter chips */
+const chips = $("#chips");
+for(const s of STARTERS){
+  const c = el("button","chip"); c.innerHTML = "";
+  c.appendChild(el("b",null,s.t));
+  c.appendChild(document.createTextNode(s.q));
+  c.addEventListener("click", ()=>{ if(busy) return; promptEl.value=s.q; autosize(); onSendClick(); });
+  chips.appendChild(c);
+}
+
+/* ─────────────────────────────  init  ───────────────────────────── */
+loadModels();
+setKernel("","kernel idle");
+promptEl.focus();
 </script>
 </body>
 </html>

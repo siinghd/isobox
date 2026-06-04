@@ -194,6 +194,11 @@ type CreateOpts struct {
 	// ExtraMounts are non-/workspace mounts every step replays (the /memory volume).
 	// The API populates this via volume.Manager.Attach(Tenant, volumeId, id, true).
 	ExtraMounts []executor.Mount
+
+	// Network, for a kernel session, gives the resident container opt-in filtered
+	// egress (a kernel's network is fixed for its lifetime). Ignored for filesystem
+	// sessions (those decide network per exec step).
+	Network bool
 }
 
 // Create makes a new filesystem session: a workspace dir + a capability token.
@@ -250,7 +255,7 @@ func (m *Manager) Create(runtime string, o CreateOpts) (*Session, error) {
 			return nil, ErrKernelBusy
 		}
 		mounts := append([]executor.Mount{{HostPath: ws, Target: "/workspace", RW: true}}, o.ExtraMounts...)
-		k, err := m.Kernels.NewKernel(context.Background(), id, lang.Image, mounts)
+		k, err := m.Kernels.NewKernel(context.Background(), id, lang.Image, mounts, o.Network)
 		if err != nil {
 			m.Kernels.Slots.Release()
 			_ = os.RemoveAll(filepath.Dir(ws))

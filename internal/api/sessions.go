@@ -20,6 +20,7 @@ type createSessionRequest struct {
 	Runtime  string `json:"runtime"`
 	TTLSec   int    `json:"ttlSec"`
 	VolumeID string `json:"volumeId"` // OPTIONAL: a memory volume to attach RW at /memory.
+	Network  bool   `json:"network"`  // kernel sessions only: opt-in filtered egress for the resident container.
 	// Type selects the session kind: "" / "filesystem" (default, zero-RAM at rest)
 	// or "kernel" (Phase 4: a resident container with a persistent Python namespace
 	// so variables/imports survive across exec steps). Defaulted server-side.
@@ -156,6 +157,7 @@ func (s *Server) createKernelSession(w http.ResponseWriter, _ *http.Request, ten
 		Type:        "kernel",
 		ID:          id,
 		ExtraMounts: extra,
+		Network:     req.Network,
 	})
 	if err != nil {
 		if req.VolumeID != "" && s.Volumes != nil {
